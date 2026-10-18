@@ -9,7 +9,7 @@ The website only shows the collection, prices and owners. Every action happens i
 
 This repository is the whole server, so you can read exactly what the connector does before you plug it in.
 
-> **Status: public test.** Balances are free test $MCP from the faucet, and sign-in accepts any handle. Nothing here is real money yet.
+> **Status: public test.** Sign in with X; balances are free test $MCP from the faucet. Nothing here is real money yet.
 
 ![Preview site](screens/market.png)
 
