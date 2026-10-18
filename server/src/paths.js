@@ -1,15 +1,23 @@
 // Finds the project root (the folder with collection/collection.json) both when running from the repo
-// and inside a serverless bundle, where files may be laid out relative to the task root instead.
+// and inside a serverless bundle. Netlify may bundle this file to CommonJS, where import.meta is empty,
+// so the module's own location is optional and the task root / cwd are tried too.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
+function moduleDir() {
+  try {
+    return path.dirname(fileURLToPath(import.meta.url));
+  } catch {
+    return null;
+  }
+}
 
 export function findRoot() {
+  const here = moduleDir();
   const candidates = [
     process.env.MCP_ROOT,
-    path.resolve(HERE, '..', '..'),
+    here && path.resolve(here, '..', '..'),
     process.env.LAMBDA_TASK_ROOT,
     process.cwd(),
     '/var/task',

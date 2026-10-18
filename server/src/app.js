@@ -27,9 +27,9 @@ export async function createApp(opts) {
   app.use((req, res, next) => {
     // behind a Netlify rewrite the function may see its own path; route by the public path
     if (req.url.startsWith('/.netlify/functions/api')) req.url = req.url.slice('/.netlify/functions/api'.length) || '/';
-    // Netlify's edge sets the real client address; rate limits key on it
-    const edgeIp = req.get('x-nf-client-connection-ip');
-    if (edgeIp) Object.defineProperty(req, 'ip', { value: edgeIp, configurable: true });
+    // rate limits key on the client address: Netlify's edge header first, never undefined
+    const ip = req.get('x-nf-client-connection-ip') || req.ip || String(req.get('x-forwarded-for') || '').split(',')[0].trim() || '0.0.0.0';
+    Object.defineProperty(req, 'ip', { value: ip, configurable: true });
     res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer' });
     next();
   });
