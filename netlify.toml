@@ -1,0 +1,38 @@
+# Netlify: the CDN serves the preview site and NFT images from dist/,
+# one function (netlify/functions/api.mjs) serves everything else.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  directory = "netlify/functions"
+  # NFT pictures go back to the chat inside tool results, so the function carries its own copy
+  included_files = ["collection/collection.json", "collection/thumbs/**"]
+
+# Anything that is not a static file goes to the function: /mcp, /authorize, /token, /register,
+# /.well-known/*, /login*, /api/*, /admin/*. Static files win because this rewrite is not forced.
+[[redirects]]
+  from = "/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    X-Frame-Options = "DENY"
+
+[[headers]]
+  for = "/img/*"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
+
+[[headers]]
+  for = "/thumb/*"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
