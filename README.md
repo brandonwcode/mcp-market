@@ -15,9 +15,11 @@ This repository is the whole server, so you can read exactly what the connector 
 
 ## Connect
 
+**[➕ Add to Claude](https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=MCP&connectorUrl=https%3A%2F%2Fmcp-market.netlify.app%2Fmcp)** opens Claude with the connector filled in: check the URL, press *Continue* → *Add* → *Connect*, sign in. Works on every Claude plan (the free plan allows one custom connector).
+
 **Connector URL:** `https://mcp-market.netlify.app/mcp`
 
-- **Claude:** Settings → Connectors → *Add custom connector* → paste the URL → *Connect* → sign in.
+- **Claude, by hand:** Customize → Connectors → *Add custom connector* → paste the URL → *Connect* → sign in.
 - **ChatGPT:** Settings → Apps & Connectors → add a connector with the same URL → sign in.
 
 Then ask for `faucet` to get test $MCP and start trading.
