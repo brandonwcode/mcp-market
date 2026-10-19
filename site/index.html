@@ -117,7 +117,7 @@ footer { border-top: 2px solid var(--edge); color: var(--dim); padding: 22px 0 4
 </style>
 </head>
 <body>
-<div class="testbar" id="testbar" hidden><b>TEST SERVER</b> · balances are free test dollars from the faucet and Solana devnet, nothing here is real money</div>
+<div class="testbar" id="testbar" hidden><b>TEST SERVER</b> · balances are free test $MCP from the faucet and Solana devnet, nothing here is real money</div>
 <header class="top">
   <div class="wrap">
     <a class="brand" href="#/"><img class="pix" src="/logo.png" alt=""><b class="px">MCP</b></a>
@@ -151,7 +151,7 @@ footer { border-top: 2px solid var(--edge); color: var(--dim); padding: 22px 0 4
       <b>ChatGPT</b>
       <ol><li>Settings → Apps &amp; Connectors → add a connector with the same URL, then sign in with X.</li></ol>
     </div>
-    <div class="say">Then just talk to it: <b>"mint me an MCP"</b>, <b>"what's on the market under $10?"</b>, <b>"buy #0042"</b>, <b>"list my Scarf for $9"</b>, <b>"top up my balance"</b></div>
+    <div class="say">Then just talk to it: <b>"mint me an MCP"</b>, <b>"what's on the market under 10?"</b>, <b>"buy #0042"</b>, <b>"list my Scarf for 9"</b>, <b>"top up my balance"</b></div>
   </div>
 </dialog>
 
@@ -160,8 +160,8 @@ footer { border-top: 2px solid var(--edge); color: var(--dim); padding: 22px 0 4
 <script>
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-// prices come from the API in US dollars
-const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// amounts come from the API as plain numbers of $MCP (1 $MCP = $1): 20, 9.99, 0.5 -> 0.50
+const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: Number.isInteger(Number(n)) ? 0 : 2, maximumFractionDigits: 6 });
 const api = (p) => fetch('/api' + p).then((r) => (r.ok ? r.json() : Promise.reject(r.status)));
 const pad = (id) => String(id).padStart(4, '0');
 const claudeLink = (q) => 'https://claude.ai/new?q=' + encodeURIComponent(q);
@@ -174,7 +174,7 @@ const state = { status: 'listed', sort: 'price_asc', character: '', rarity: '' }
 try { Object.assign(state, JSON.parse(localStorage.getItem('mcp-filter') || '{}')); } catch {}
 
 function card(n) {
-  const price = n.price != null ? `<div class="price">${fmt(n.price)}</div>`
+  const price = n.price != null ? `<div class="price">${fmt(n.price)} <small style="color:var(--dim)">$MCP</small></div>`
     : `<div class="price na">${n.minted_at ? 'not for sale' : 'mintable'}</div>`;
   return `<a class="card" href="#/nft/${n.id}">
     <img class="pix" src="${n.thumb}" alt="${esc(n.name)}" loading="lazy" width="256" height="256">
@@ -193,7 +193,7 @@ async function renderMarket() {
       <section class="hero">
         <div>
           <h1 class="px">The first memecoin<br><span>inside your AI.</span></h1>
-          <p>Browse the collection here. Mint, buy and sell only by talking to Claude or ChatGPT. Your balance and NFTs live in your MCP account; top it up with USDC or USDT on Solana.</p>
+          <p>Browse the collection here. Mint, buy and sell only by talking to Claude or ChatGPT. Your balance and NFTs live in your MCP account. 1 $MCP = $1: top it up with USDC or USDT on Solana.</p>
           <div class="cta">
             <a class="btn red" data-add-claude href="${addToClaude(stats?.mcp_url || location.origin + '/mcp')}" target="_blank" rel="noopener">Add to Claude</a>
             <a class="btn ghost" href="${claudeLink('Mint me an MCP NFT')}" target="_blank" rel="noopener">Mint in Claude</a>
@@ -232,17 +232,17 @@ async function loadStats() {
   const el = $('#stats');
   if (!el) return;
   el.innerHTML = [
-    ['Floor', stats.floor != null ? fmt(stats.floor) : '—'],
+    ['Floor', stats.floor != null ? `${fmt(stats.floor)} <small>$MCP</small>` : '—'],
     ['Minted', `${stats.minted}<small>/${stats.supply}</small>`],
-    ['Mint price', fmt(stats.mint_price)],
-    ['Listed', stats.listed], ['Holders', stats.holders], ['Volume', fmt(stats.volume)],
+    ['Mint price', `${fmt(stats.mint_price)} <small>$MCP</small>`],
+    ['Listed', stats.listed], ['Holders', stats.holders], ['Volume', `${fmt(stats.volume)} <small>$MCP</small>`],
   ].map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 }
 
 async function loadTicker() {
   const sales = await api('/sales');
   if (!sales.length) return;
-  const items = sales.map((s) => `<span><b>MCP #${pad(s.nft_id)}</b> sold for <i>${fmt(s.price)}</i> · @${esc(s.buyer)}</span>`).join('');
+  const items = sales.map((s) => `<span><b>MCP #${pad(s.nft_id)}</b> sold for <i>${fmt(s.price)} $MCP</i> · @${esc(s.buyer)}</span>`).join('');
   const t = $('#ticker');
   t.innerHTML = `<div class="row">${items}${items}</div>`;
   t.hidden = false;
@@ -275,13 +275,13 @@ async function openNft(id) {
   const dlg = $('#nftDlg');
   const n = await api('/nfts/' + id).catch(() => null);
   if (!n) return;
-  const q = n.price != null ? `Buy MCP #${pad(n.id)} for ${fmt(n.price)}` : !n.minted_at ? 'Mint me an MCP NFT' : `Show me MCP #${pad(n.id)}`;
+  const q = n.price != null ? `Buy MCP #${pad(n.id)} for ${n.price} $MCP` : !n.minted_at ? 'Mint me an MCP NFT' : `Show me MCP #${pad(n.id)}`;
   const action = n.price != null
-    ? `<div class="big">${fmt(n.price)}</div>
+    ? `<div class="big">${fmt(n.price)} <small style="color:var(--dim)">$MCP</small></div>
        <div class="acts"><a class="btn red" href="${claudeLink(q)}" target="_blank" rel="noopener">Buy in Claude</a>
        <a class="btn ghost" href="${gptLink(q)}" target="_blank" rel="noopener">Buy in ChatGPT</a></div>`
     : !n.minted_at
-      ? `<div class="big" style="font-size:18px">Not minted yet</div><div style="color:var(--dim);font-size:12px">Mint gives you a random NFT from the collection for ${fmt(stats?.mint_price ?? 5)}.</div>
+      ? `<div class="big" style="font-size:18px">Not minted yet</div><div style="color:var(--dim);font-size:12px">Mint gives you a random NFT from the collection for ${fmt(stats?.mint_price ?? 5)} $MCP.</div>
        <div class="acts"><a class="btn red" href="${claudeLink(q)}" target="_blank" rel="noopener">Mint in Claude</a>
        <a class="btn ghost" href="${gptLink(q)}" target="_blank" rel="noopener">Mint in ChatGPT</a></div>`
       : `<div class="big" style="font-size:18px">Not for sale</div><div style="color:var(--dim);font-size:12px">Owned by @${esc(n.owner)}.</div>`;
@@ -297,7 +297,7 @@ async function openNft(id) {
         <div><div class="k">Palette</div>${esc(n.palette)}</div><div><div class="k">Rarity</div>${esc(n.rarity)}</div>
       </div>
       <div class="hist"><div style="color:var(--cream)"><span>Sales</span><span></span></div>
-        ${n.history.map((h) => `<div><span>@${esc(h.seller)} → @${esc(h.buyer)}</span><span>${fmt(h.price)}</span></div>`).join('') || '<div><span>No sales yet</span><span></span></div>'}
+        ${n.history.map((h) => `<div><span>@${esc(h.seller)} → @${esc(h.buyer)}</span><span>${fmt(h.price)} $MCP</span></div>`).join('') || '<div><span>No sales yet</span><span></span></div>'}
       </div>
     </div></div>`;
   if (!dlg.open) dlg.showModal();
