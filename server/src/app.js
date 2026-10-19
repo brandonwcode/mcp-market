@@ -12,6 +12,7 @@ import { findRoot } from './paths.js';
 import * as m from './market.js';
 import { toMicro, units, MoneyError } from './money.js';
 import { createDeposits } from './deposits.js';
+import { createWithdrawals } from './withdrawals.js';
 
 const sameSecret = (given, key) => {
   if (!key || typeof given !== 'string') return false;
@@ -29,6 +30,7 @@ export async function createApp(opts) {
   const serveStatic = opts.serveStatic ?? true;
   await m.seedCollection(db, path.join(collectionDir, 'collection.json'));
   const deposits = opts.deposits || createDeposits(db, { publicUrl, rpc: opts.rpc, helius: opts.helius, config: opts.depositConfig });
+  const withdrawals = opts.withdrawals || createWithdrawals(db, { rpc: opts.rpc, config: opts.withdrawConfig });
 
   const app = express();
   app.set('trust proxy', 1);
@@ -58,7 +60,7 @@ export async function createApp(opts) {
   const auth = requireBearerAuth({ verifier: provider, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(mcpUrl) });
   const thumbsDir = path.join(collectionDir, 'thumbs');
   app.post('/mcp', auth, express.json({ limit: '1mb' }), async (req, res) => {
-    const server = buildMcpServer(db, req.auth.extra.userId, { publicUrl, thumbsDir, deposits });
+    const server = buildMcpServer(db, req.auth.extra.userId, { publicUrl, thumbsDir, deposits, withdrawals });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     let closed = false;
     const cleanup = () => {
@@ -133,7 +135,15 @@ export async function createApp(opts) {
   // Body: { handle, amount ($MCP), tx }. One tx is credited once.
   app.post('/admin/deposit', express.json(), async (req, res) => {
     if (!sameSecret(String(req.get('authorization') || '').replace(/^Bearer /, ''), process.env.ADMIN_TOKEN)) return res.status(401).json({ error: 'unauthorized' });
-    const { handle, amount, tx } = req.body || {};
+    const { handle, amount } = req.body || {};
+    // a Solana signature, also when pasted as an explorer link; anything else is a free-form support reference
+    let tx = String(req.body?.tx || '').trim();
+    const sig = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/.exec(tx)?.[0] || /\/tx\/([1-9A-HJ-NP-Za-km-z]{64,90})/.exec(tx)?.[1];
+    if (sig) {
+      tx = sig;
+      const [done] = await db.query("select user_id from deposits where signature = $1 and status = 'credited' limit 1", [sig]);
+      if (done) return res.status(409).json({ error: 'this transaction was already credited automatically', user_id: done.user_id });
+    }
     const [u] = await db.query('select id from users where handle = $1', [String(handle || '').toLowerCase()]);
     let micro;
     try {
@@ -157,5 +167,5 @@ export async function createApp(opts) {
     if (res.headersSent) return next(err);
     res.status(err.status || 500).json({ error: err.expose ? err.message : 'internal error' });
   });
-  return { app, db, deposits };
+  return { app, db, deposits, withdrawals };
 }

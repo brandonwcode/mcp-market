@@ -104,10 +104,57 @@ create table if not exists withdrawals (
   user_id int not null references users(id),
   amount bigint not null check (amount > 0),
   address text not null,
-  status text not null default 'pending', -- pending | sent | failed
+  status text not null default 'pending', -- review | pending | sending | sent | rejected | refunded (see withdrawals.js)
   tx text,
   created_at timestamptz not null default now()
 );
+-- amount = what arrives as USDC; fee is charged on top. mac signs the row (withdrawals.js).
+alter table withdrawals add column if not exists fee bigint not null default 0;
+alter table withdrawals add column if not exists network text;
+alter table withdrawals add column if not exists mac text;
+alter table withdrawals add column if not exists attempts int not null default 0;
+alter table withdrawals add column if not exists error text;
+alter table withdrawals add column if not exists sent_at timestamptz;
+alter table withdrawals add column if not exists refunded_at timestamptz;
+alter table withdrawals add column if not exists updated_at timestamptz;
+create index if not exists withdrawals_status on withdrawals(network, status, id);
+create index if not exists withdrawals_user on withdrawals(user_id, id desc);
+-- every transaction ever signed for a withdrawal, stored before it is broadcast and never deleted
+create table if not exists withdrawal_attempts (
+  id bigserial primary key,
+  withdrawal_id bigint not null references withdrawals(id),
+  signature text not null unique,
+  raw text not null,                    -- the signed transaction, to rebroadcast the very same bytes
+  last_valid_height bigint not null,    -- past this block height it can never land
+  created_at timestamptz not null default now()
+);
+create index if not exists withdrawal_attempts_w on withdrawal_attempts(withdrawal_id);
+alter table users add column if not exists withdraw_address_set_at timestamptz;
+alter table users add column if not exists withdraw_mac text;           -- HMAC of the binding (withdrawals.js)
+
+-- Guards against mistakes in the table editor: sent and refunded are final, what a withdrawal pays
+-- (amount, fee, address, user) never changes, and stored transactions are never changed or deleted.
+create or replace function withdrawals_guard() returns trigger language plpgsql as $g$
+begin
+  if old.status in ('sent', 'refunded') and new.status is distinct from old.status then
+    raise exception 'withdrawal % is %, which is final', old.id, old.status;
+  end if;
+  if new.amount <> old.amount or new.fee <> old.fee or new.address <> old.address or new.user_id <> old.user_id
+     or new.network is distinct from old.network or (old.mac is not null and new.mac is distinct from old.mac) then
+    raise exception 'withdrawal %: amount, fee, address, user, network and signature can not be changed', old.id;
+  end if;
+  return new;
+end $g$;
+drop trigger if exists withdrawals_guard on withdrawals;
+create trigger withdrawals_guard before update on withdrawals for each row execute function withdrawals_guard();
+create or replace function withdrawal_attempts_guard() returns trigger language plpgsql as $g$
+begin
+  raise exception 'withdrawal_attempts can not be changed or deleted';
+end $g$;
+drop trigger if exists withdrawal_attempts_guard on withdrawal_attempts;
+create trigger withdrawal_attempts_guard before update or delete on withdrawal_attempts for each row execute function withdrawal_attempts_guard();
+-- a withdrawal is refunded at most once
+create unique index if not exists ledger_withdraw_refund on ledger(ref) where kind = 'withdraw_refund';
 
 -- OAuth for the MCP connector. Codes and tokens are stored as sha256 hashes, never in plain text.
 create table if not exists oauth_clients (
@@ -147,6 +194,7 @@ alter table nfts enable row level security;
 alter table ledger enable row level security;
 alter table sales enable row level security;
 alter table withdrawals enable row level security;
+alter table withdrawal_attempts enable row level security;
 alter table deposit_pool enable row level security;
 alter table deposit_accounts enable row level security;
 alter table deposits enable row level security;
@@ -171,7 +219,20 @@ const DATA_MIGRATIONS = [
     update ledger set delta = delta * 10000;
     update nfts set price = price * 10000 where price is not null;
     update sales set price = price * 10000;
-    update withdrawals set amount = amount * 10000;`],
+    alter table withdrawals disable trigger withdrawals_guard;
+    update withdrawals set amount = amount * 10000;
+    alter table withdrawals enable trigger withdrawals_guard;`],
+  // 2026-10-19: automatic payouts. Withdrawals queued before them were never paid (nothing could pay them):
+  // they are refunded. Addresses bound before signed bindings keep working but their withdrawals wait for review.
+  ['withdraw-v2', `
+    with legacy as (
+      update withdrawals set status = 'refunded', refunded_at = now(), error = 'queued before automatic payouts: refunded'
+      where status = 'pending' and mac is null returning id, user_id, amount + fee as total
+    ), l as (
+      insert into ledger (user_id, delta, kind, ref) select user_id, total, 'withdraw_refund', 'w' || id from legacy returning user_id, delta
+    )
+    update users u set balance = u.balance + s.total from (select user_id, sum(delta) as total from l group by user_id) s where u.id = s.user_id;
+    update users set withdraw_address_set_at = now() where withdraw_address is not null and withdraw_address_set_at is null;`],
 ];
 
 const VERSION = crypto.createHash('sha256').update(SCHEMA + DATA_MIGRATIONS.map(([k]) => k).join(',')).digest('hex').slice(0, 16);

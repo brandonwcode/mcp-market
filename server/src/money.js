@@ -28,6 +28,7 @@ export const units = (micro) => (micro == null ? null : Number(micro) / MICRO);
 export function toMicro(value, { decimals = 2, what = 'Amount' } = {}) {
   const num = typeof value === 'string' ? Number(value.trim().replace(/^\$/, '').replace(/\s*\$?MCP$/i, '')) : value;
   if (typeof num !== 'number' || !Number.isFinite(num) || num <= 0) throw new MoneyError(`${what} must be an amount of ${UNIT} above zero.`);
+  if (num > 9e9) throw new MoneyError(`${what} is too large.`);
   const fixed = num.toFixed(decimals);
   if (Math.abs(Number(fixed) - num) > 1e-9) {
     throw new MoneyError(decimals === 2 ? `${what} can have at most 2 decimals, like 12.50.` : `${what} has too many decimal places.`);

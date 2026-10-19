@@ -14,8 +14,8 @@ import { POOL_KEY, poolRowValid, poolStats, poolLow } from './pool.js';
 
 const WATCH = "interval '2 hours'";  // after someone asks for their address, the scheduled scan checks them often
 const RECHECK_MS = 10_000;           // on-demand scans of one token account at most this often (config.recheckMs)
-const PAGE = 100;
-const MAX_PAGES = 10;
+const PAGE = 1000;
+const MAX_PAGES = 20;
 const SIG = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/;
 
 export class PoolError extends Error {}
@@ -122,8 +122,10 @@ export function createDeposits(db, opts = {}) {
 
   // one positive balance change of one of our token accounts in one confirmed transaction
   async function record({ userId, signature, token, tokenAccount, micro, slot }) {
-    const status = micro >= BigInt(cfg.minDeposit) ? 'credited' : 'too_small';
     return db.tx(async (t) => {
+      // support already credited this transaction to this user by hand (POST /admin/deposit with its signature)
+      const manual = (await t.query("select 1 from ledger where kind = 'deposit' and ref = $1 and user_id = $2", [`manual ${signature}`, userId])).length;
+      const status = manual ? 'manual' : micro >= BigInt(cfg.minDeposit) ? 'credited' : 'too_small';
       const ins = await t.query(
         `insert into deposits (user_id, signature, token, token_account, amount, slot, status) values ($1, $2, $3, $4, $5, $6, $7)
          on conflict (signature, token_account) do nothing returning id`,
@@ -147,6 +149,15 @@ export function createDeposits(db, opts = {}) {
       ...(tx.meta.loadedAddresses?.readonly || []),
     ];
     const pre = new Map((tx.meta.preTokenBalances || []).map((b) => [b.accountIndex, b]));
+    // money moving between our own addresses (the owner's sweep, by mistake into a pool address) is not a deposit
+    const post = new Map((tx.meta.postTokenBalances || []).map((b) => [b.accountIndex, b]));
+    const senders = [...pre.values()].filter((b) => mints.has(b.mint) && BigInt(b.uiTokenAmount?.amount ?? '0') > BigInt(post.get(b.accountIndex)?.uiTokenAmount?.amount ?? '0'))
+      .map((b) => b.owner).filter(Boolean);
+    const ownSenders = senders.length ? await db.query('select network, idx, address, mac from deposit_pool where address = any($1) and network = $2', [senders, network]) : [];
+    if (ownSenders.some(valid)) {
+      log('not credited: a transfer out of one of our own pool addresses', signature);
+      return [];
+    }
     const changes = [];
     for (const b of tx.meta.postTokenBalances || []) {
       const token = mints.get(b.mint);

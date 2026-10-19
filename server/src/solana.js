@@ -11,6 +11,7 @@ import { wordlist } from '@scure/bip39/wordlists/english';
 import { ed25519 } from '@noble/curves/ed25519';
 
 export const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+export const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 export const ATA_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
 
 // Stablecoins accepted per network. USDC and USDT both have 6 decimals and use the classic token program.
@@ -54,13 +55,18 @@ function slip10(seed, path) {
   return I.subarray(0, 32);
 }
 
-// public address of wallet #index under the phrase: m/44'/501'/index'/0'
-export function deriveAddress(seed, index) {
+// wallet #index under the phrase: m/44'/501'/index'/0'. Only the owner's scripts ever need the secret.
+export function deriveKeypair(seed, index) {
   if (!Number.isInteger(index) || index < 0 || index >= 0x80000000) throw new Error('bad derivation index');
-  const secret = slip10(seed, [44, 501, index, 0]);
-  const pub = ed25519.getPublicKey(secret);
-  secret.fill(0);
-  return base58.encode(pub);
+  const secret = Buffer.from(slip10(seed, [44, 501, index, 0]));
+  return { publicKey: base58.encode(ed25519.getPublicKey(secret)), seed: secret };
+}
+
+// public address of wallet #index under the phrase
+export function deriveAddress(seed, index) {
+  const kp = deriveKeypair(seed, index);
+  kp.seed.fill(0);
+  return kp.publicKey;
 }
 
 // ---------- program derived addresses ----------
@@ -93,10 +99,14 @@ export const associatedTokenAddress = (owner, mint, tokenProgram = TOKEN_PROGRAM
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// JSON-RPC client. Errors never include the URL, which carries the API key.
+// JSON-RPC client. Errors never include the URL, which carries the API key. An error the node answered
+// with (e.g. a rejected transaction) has err.rpcError = true and err.code; a failed connection has
+// err.network = true, which for sendTransaction means "unknown whether it was received".
 export function makeRpc(url, { fetchImpl = globalThis.fetch, timeoutMs = 8000 } = {}) {
   let id = 0;
   return async function rpc(method, params) {
+    // a sendTransaction is never repeated here: a second try could hide that the first one got through
+    const retries = method === 'sendTransaction' ? 0 : 1;
     for (let attempt = 0; ; attempt++) {
       let res;
       try {
@@ -107,15 +117,16 @@ export function makeRpc(url, { fetchImpl = globalThis.fetch, timeoutMs = 8000 } 
           signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (e) {
-        if (attempt < 1) continue;
-        throw new Error(`${method}: network error (${e.name})`);
+        if (attempt < retries) continue;
+        throw Object.assign(new Error(`${method}: network error (${e.name})`), { network: true });
       }
-      if ((res.status === 429 || res.status >= 500) && attempt < 2) {
+      if ((res.status === 429 || res.status >= 500) && attempt < retries * 2) {
         await sleep(300 * (attempt + 1));
         continue;
       }
       const j = await res.json().catch(() => null);
-      if (!res.ok || !j || j.error) throw new Error(`${method}: ${j?.error?.message || `HTTP ${res.status}`}`);
+      if (j?.error) throw Object.assign(new Error(`${method}: ${j.error.message}`), { rpcError: true, code: j.error.code, data: j.error.data });
+      if (!res.ok || !j) throw Object.assign(new Error(`${method}: HTTP ${res.status}`), { network: true });
       return j.result;
     }
   };

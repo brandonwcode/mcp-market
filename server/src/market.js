@@ -1,4 +1,4 @@
-// Market rules: balances, mint, listings, buys, withdrawals. Every balance change writes a ledger row
+// Market rules: balances, mint, listings, buys. Every balance change writes a ledger row
 // in the same transaction, so sum(ledger) per user always equals users.balance.
 // All amounts are integer micro-units of $MCP, 1 $MCP = $1 (see money.js).
 import fs from 'node:fs';
@@ -8,7 +8,6 @@ export const CONFIG = {
   mintPrice: toMicro(process.env.MINT_PRICE_USD || '5'),
   mintLimit: Number(process.env.MINT_LIMIT_PER_USER || 5),
   feeBps: Number(process.env.FEE_BPS || 250), // 2.5% market fee to the treasury
-  minWithdraw: toMicro(process.env.MIN_WITHDRAW_USD || '1'),
   faucetAmount: toMicro(process.env.FAUCET_USD || '20'),
   testMode: process.env.TEST_MODE === '1',
 };
@@ -121,23 +120,7 @@ export async function buy(db, buyerId, nftId, expectedPrice) {
   });
 }
 
-export async function setWithdrawAddress(db, userId, address) {
-  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) fail('That is not a Solana address.');
-  const rows = await db.query('update users set withdraw_address = $1 where id = $2 and withdraw_address is null returning *', [address, userId]);
-  if (!rows.length) fail('A withdrawal address is already bound to this account. Changing it requires support.');
-  return rows[0];
-}
-
-export async function withdraw(db, userId, amount) {
-  if (!Number.isInteger(amount) || amount < CONFIG.minWithdraw) fail(`Minimum withdrawal is ${fmt(CONFIG.minWithdraw)}.`);
-  return db.tx(async (t) => {
-    const [u] = await t.query('select * from users where id = $1', [userId]);
-    if (!u.withdraw_address) fail('Bind a withdrawal address first (set_withdraw_address).');
-    await move(t, userId, -amount, 'withdraw', u.withdraw_address);
-    const [w] = await t.query('insert into withdrawals (user_id, amount, address) values ($1, $2, $3) returning *', [userId, amount, u.withdraw_address]);
-    return w;
-  });
-}
+// Withdrawals (binding the address, requests, payouts) live in withdrawals.js.
 
 // ---------- read side, shared by the MCP tools and the public preview API ----------
 
