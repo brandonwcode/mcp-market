@@ -9,6 +9,7 @@ process.env.ADMIN_TOKEN = 'admin-secret';
 const { createHandler } = await import('../src/lambda.js');
 const { openDb } = await import('../src/db.js');
 const { runSuite } = await import('./suite.js');
+const { fakeChain, testDepositConfig, seedPool } = await import('./fakechain.js');
 
 // turn a real HTTP request into a Netlify Functions (Lambda v1) event and back
 function shim(handler) {
@@ -56,10 +57,12 @@ const s = runSuite(async () => {
   const db = await openDb({ url: process.env.TEST_DATABASE_URL || '' });
   const port = 3990 + Math.floor(Math.random() * 9);
   const base = `http://127.0.0.1:${port}`;
-  const handler = createHandler({ db, publicUrl: base, devLogin: true });
+  const chain = fakeChain();
+  await seedPool(db);
+  const handler = createHandler({ db, publicUrl: base, devLogin: true, rpc: chain.rpc, helius: chain.helius, depositConfig: testDepositConfig() });
   const server = shim(handler);
   await new Promise((r) => server.listen(port, r));
-  return { base, db, close: async () => { server.close(); await db.close(); } };
+  return { base, db, chain, close: async () => { server.close(); await db.close(); } };
 });
 
 test('serverless: static files are left to the CDN', async () => {

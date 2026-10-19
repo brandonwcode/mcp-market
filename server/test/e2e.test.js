@@ -7,14 +7,17 @@ process.env.ADMIN_TOKEN = 'admin-secret';
 const { createApp } = await import('../src/app.js');
 const { openDb } = await import('../src/db.js');
 const { runSuite } = await import('./suite.js');
+const { fakeChain, testDepositConfig, seedPool } = await import('./fakechain.js');
 
 const s = runSuite(async () => {
   const db = await openDb({ url: process.env.TEST_DATABASE_URL || '' });
   const port = 3900 + Math.floor(Math.random() * 90);
   const base = `http://127.0.0.1:${port}`;
-  const { app } = await createApp({ db, publicUrl: base, devLogin: true });
+  const chain = fakeChain();
+  await seedPool(db);
+  const { app } = await createApp({ db, publicUrl: base, devLogin: true, rpc: chain.rpc, helius: chain.helius, depositConfig: testDepositConfig() });
   const server = await new Promise((r) => { const sv = app.listen(port, () => r(sv)); });
-  return { base, db, close: async () => { server.close(); await db.close(); } };
+  return { base, db, chain, close: async () => { server.close(); await db.close(); } };
 });
 
 test('local server also serves the site and images', async () => {
