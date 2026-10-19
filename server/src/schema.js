@@ -117,6 +117,8 @@ alter table withdrawals add column if not exists error text;
 alter table withdrawals add column if not exists sent_at timestamptz;
 alter table withdrawals add column if not exists refunded_at timestamptz;
 alter table withdrawals add column if not exists updated_at timestamptz;
+alter table withdrawals add column if not exists client_key text; -- made by the withdrawal form: a retry never makes a second withdrawal
+create unique index if not exists withdrawals_client_key on withdrawals(user_id, client_key) where client_key is not null;
 create index if not exists withdrawals_status on withdrawals(network, status, id);
 create index if not exists withdrawals_user on withdrawals(user_id, id desc);
 -- every transaction ever signed for a withdrawal, stored before it is broadcast and never deleted
@@ -140,8 +142,9 @@ begin
     raise exception 'withdrawal % is %, which is final', old.id, old.status;
   end if;
   if new.amount <> old.amount or new.fee <> old.fee or new.address <> old.address or new.user_id <> old.user_id
-     or new.network is distinct from old.network or (old.mac is not null and new.mac is distinct from old.mac) then
-    raise exception 'withdrawal %: amount, fee, address, user, network and signature can not be changed', old.id;
+     or new.network is distinct from old.network or (old.mac is not null and new.mac is distinct from old.mac)
+     or new.client_key is distinct from old.client_key then
+    raise exception 'withdrawal %: amount, fee, address, user, network, signature and request key can not be changed', old.id;
   end if;
   return new;
 end $g$;

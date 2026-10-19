@@ -131,15 +131,49 @@ export function createWithdrawals(db, opts = {}) {
 
   // ---------- requesting ----------
 
-  async function request(userId, amount) {
+  async function findByKey(userId, clientKey) {
+    if (!/^[A-Za-z0-9_-]{16,64}$/.test(String(clientKey || ''))) return null;
+    return (await db.query('select * from withdrawals where user_id = $1 and client_key = $2', [userId, clientKey]))[0] || null;
+  }
+
+  // The withdrawal form's pass: the server hands it out with the form (in the tool result's _meta, which MCP
+  // Apps hosts give to the form and keep out of the AI's context) and the form's buttons need it. It stops an
+  // assistant in an app that ignores visibility "app" from binding or withdrawing on its own.
+  const FORM_TTL_MS = 2 * 3600e3;
+  const formTokenFor = (userId, exp) => `${exp}.${hmac(`mcp-form:${network}:${userId}:${exp}`)}`;
+  function formToken(userId) {
+    if (!enabled) return null;
+    return formTokenFor(userId, Date.now() + FORM_TTL_MS);
+  }
+  function formTokenOk(userId, token) {
+    if (!enabled) return false;
+    const m = /^(\d{13})\.[0-9a-f]{64}$/.exec(String(token || ''));
+    if (!m || Number(m[1]) < Date.now() || Number(m[1]) > Date.now() + FORM_TTL_MS) return false;
+    return same(String(token), formTokenFor(userId, m[1]));
+  }
+
+  // clientKey: made by the withdrawal form for each confirmed withdrawal. A retry with the same key (an answer lost
+  // on the way back) returns the withdrawal made the first time instead of making a second one.
+  async function request(userId, amount, { clientKey = null } = {}) {
     if (!enabled) fail('Withdrawals are not open yet. Your balance is safe.');
-    if (cfg.paused) fail('Withdrawals are paused for maintenance right now. Your balance is safe; try again later.');
-    if (!Number.isInteger(amount) || amount < cfg.min) fail(`Minimum withdrawal is ${mcp(cfg.min)}.`);
+    if (clientKey != null && !/^[A-Za-z0-9_-]{16,64}$/.test(String(clientKey))) fail('Bad request key.');
+    // a repeat is answered with what happened the first time, before any other check
+    if (clientKey) {
+      const first = await findByKey(userId, clientKey);
+      if (first) return { ...first, repeated: true };
+    }
     let hold = null;
     const w = await db.tx(async (t) => {
       await t.query(`select pg_advisory_xact_lock(${LOCK})`);
+      if (clientKey) {
+        const [same] = await t.query('select * from withdrawals where user_id = $1 and client_key = $2', [userId, clientKey]);
+        if (same) return { ...same, repeated: true };
+      }
+      // checked after the repeat lookup, so a retry of a request that went through is never told "no"
+      if (cfg.paused) fail('Withdrawals are paused for maintenance right now. Your balance is safe; try again later.');
+      if (!Number.isInteger(amount) || amount < cfg.min) fail(`Minimum withdrawal is ${mcp(cfg.min)}.`);
       const [u] = await t.query('select id, balance, withdraw_address, withdraw_address_set_at, withdraw_mac from users where id = $1 for update', [userId]);
-      if (!u.withdraw_address) fail('Bind a withdrawal address first (set_withdraw_address).');
+      if (!u.withdraw_address) fail('Bind a withdrawal address first, in the withdrawal form.');
       if (u.withdraw_mac == null) {
         hold = 'address bound before signed bindings: check it';
       } else if (!same(u.withdraw_mac, bindMacOf(userId, u.withdraw_address, u.withdraw_address_set_at))) {
@@ -165,8 +199,8 @@ export function createWithdrawals(db, opts = {}) {
         where network = $1 and status in ('pending', 'sending', 'sent') and created_at > now() - interval '1 day' ${oneUser ? 'and user_id = $2' : ''}`,
       oneUser ? [network, userId] : [network]))[0].s);
       const auto = !hold && amount <= cfg.autoMax && (await sums(true)) + amount <= cfg.userDaily && (await sums(false)) + amount <= cfg.daily;
-      const [row] = await t.query(`insert into withdrawals (user_id, amount, fee, address, status, network, error, updated_at)
-        values ($1, $2, $3, $4, $5, $6, $7, now()) returning *`, [userId, amount, cfg.fee, u.withdraw_address, auto ? 'pending' : 'review', network, hold]);
+      const [row] = await t.query(`insert into withdrawals (user_id, amount, fee, address, status, network, error, client_key, updated_at)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, now()) returning *`, [userId, amount, cfg.fee, u.withdraw_address, auto ? 'pending' : 'review', network, hold, clientKey]);
       row.mac = macOf(row);
       await t.query('update withdrawals set mac = $1 where id = $2', [row.mac, row.id]);
       const debited = await t.query('update users set balance = balance - $1 where id = $2 and balance >= $1 returning id', [total, userId]);
@@ -176,7 +210,7 @@ export function createWithdrawals(db, opts = {}) {
         [userId, -amount, -cfg.fee, ref, cfg.fee]);
       return row;
     });
-    if (w.status === 'review') log(`withdrawal #${w.id} of ${mcp(w.amount)} waits for review`);
+    if (w.status === 'review' && !w.repeated) log(`withdrawal #${w.id} of ${mcp(w.amount)} waits for review`);
     return w;
   }
 
@@ -394,10 +428,13 @@ export function createWithdrawals(db, opts = {}) {
     cluster: network,
     hotWallet: hot?.publicKey ?? null,
     // public settings only: no keys, no RPC URL
-    config: { fee: cfg.fee, min: cfg.min, autoMax: cfg.autoMax, userDaily: cfg.userDaily, daily: cfg.daily, hardDaily: cfg.hardDaily, addressDelayHours: cfg.addressDelayHours },
+    config: { fee: cfg.fee, min: cfg.min, autoMax: cfg.autoMax, userDaily: cfg.userDaily, daily: cfg.daily, hardDaily: cfg.hardDaily, addressDelayHours: cfg.addressDelayHours, paused: cfg.paused },
     explorer: (sig) => explorerTx(sig, network),
     bindAddress,
     request,
+    findByKey,
+    formToken,
+    formTokenOk,
     send,
     macOk,
 

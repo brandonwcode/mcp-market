@@ -13,6 +13,7 @@ import * as m from './market.js';
 import { toMicro, units, MoneyError } from './money.js';
 import { createDeposits } from './deposits.js';
 import { createWithdrawals } from './withdrawals.js';
+import { withdrawUi } from './ui.js';
 
 const sameSecret = (given, key) => {
   if (!key || typeof given !== 'string') return false;
@@ -88,12 +89,22 @@ export async function createApp(opts) {
   const num = units;
   const shape = (n) => ({ ...n, price: num(n.price), image: `/img/${n.id}.png`, thumb: `/thumb/${n.id}.png` });
   const str = (v) => (typeof v === 'string' ? v : undefined);
+  // whether this deploy can build the withdrawal form (it needs the bundled MCP Apps SDK file)
+  const formInfo = () => {
+    try {
+      const f = withdrawUi();
+      return { uri: f.uri, bytes: Buffer.byteLength(f.html) };
+    } catch (e) {
+      return { error: e.message.slice(0, 200) };
+    }
+  };
   api.get('/stats', async (req, res) => {
     const s = await m.stats(db);
     res.json({
       ...s, floor: num(s.floor), volume: num(s.volume), mint_price: num(s.mint_price), currency: 'MCP', usd_per_mcp: 1,
       deposits: deposits.enabled ? { network: deposits.cluster === 'mainnet' ? 'solana' : `solana-${deposits.cluster}`, tokens: deposits.tokens.map((t) => t.symbol) } : null,
       mcp_url: mcpUrl.toString(), test_mode: m.CONFIG.testMode,
+      withdrawals: withdrawals.enabled ? { network: withdrawals.cluster, form: formInfo() } : null,
     });
   });
   api.get('/nfts', async (req, res) => {
