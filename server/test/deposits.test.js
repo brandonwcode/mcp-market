@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { usd, toMicro, tokenToMicro, MoneyError } from '../src/money.js';
+import { mcp, amount, toMicro, tokenToMicro, MoneyError } from '../src/money.js';
 import { seedFromMnemonic, deriveAddress, associatedTokenAddress, isAddress, STABLECOINS } from '../src/solana.js';
 import { createDeposits, depositConfig } from '../src/deposits.js';
 import { poolKeyFromSeed, poolRowValid, parsePoolCsv } from '../src/pool.js';
@@ -19,13 +19,16 @@ import { fakeChain, testDepositConfig, seedPool, randomAddress, TEST_MNEMONIC, T
 const D = (dollars) => Math.round(dollars * 1e6);
 const quiet = () => {};
 
-test('money: formatting and parsing dollars', () => {
-  assert.equal(usd(0), '$0.00');
-  assert.equal(usd(5_000_000), '$5.00');
-  assert.equal(usd(1_234_500_000), '$1,234.50');
-  assert.equal(usd(249_750), '$0.24975');
-  assert.equal(usd(-20_000), '-$0.02');
-  assert.equal(usd('900'), '$0.0009');
+test('money: formatting and parsing $MCP amounts', () => {
+  assert.equal(mcp(0), '0 $MCP');
+  assert.equal(mcp(5_000_000), '5 $MCP');
+  assert.equal(mcp(1_234_500_000), '1,234.50 $MCP');
+  assert.equal(mcp(249_750), '0.24975 $MCP');
+  assert.equal(mcp(-20_000), '-0.02 $MCP');
+  assert.equal(mcp('900'), '0.0009 $MCP');
+  assert.equal(amount(7_800_000), '7.80');
+  assert.equal(toMicro('12.5 MCP'), 12_500_000);
+  assert.equal(toMicro('12.5 $MCP'), 12_500_000);
   assert.equal(toMicro(12.5), 12_500_000);
   assert.equal(toMicro('19.99'), 19_990_000);
   assert.equal(toMicro('$3'), 3_000_000);

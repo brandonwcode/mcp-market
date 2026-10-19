@@ -119,7 +119,7 @@ export function runSuite(setup) {
 
     // no money yet
     assert.equal((await call(alice, 'mint')).isError, true);
-    assert.match((await call(alice, 'faucet')).text, /Added \$20\.00 of test money/);
+    assert.match((await call(alice, 'faucet')).text, /Added 20 \$MCP of test money/);
     assert.equal((await call(alice, 'faucet')).isError, true, 'faucet once a day');
 
     const m1 = await call(alice, 'mint');
@@ -131,20 +131,20 @@ export function runSuite(setup) {
     assert.notEqual(id1, id2);
     assert.equal(await balanceOf('alice'), D(10));
 
-    // only the owner can list; prices are whole cents
+    // only the owner can list; prices have at most 2 decimals
     assert.equal((await call(bob, 'sell', { nft_id: id1, price: 5 })).isError, true);
     const fraction = await call(alice, 'sell', { nft_id: id1, price: 8.005 });
     assert.equal(fraction.isError, true);
-    assert.match(fraction.text, /whole cents/);
+    assert.match(fraction.text, /at most 2 decimals/);
     const listed = await call(alice, 'sell', { nft_id: id1, price: 8 });
-    assert.match(listed.text, /listed at \$8\.00\. If it sells you get \$7\.80/);
-    assert.match((await call(bob, 'market')).text, new RegExp(`MCP #${String(id1).padStart(4, '0')}.*\\$8\\.00`));
+    assert.match(listed.text, /listed at 8 \$MCP\. If it sells you get 7\.80 \$MCP/);
+    assert.match((await call(bob, 'market')).text, new RegExp(`MCP #${String(id1).padStart(4, '0')}.* 8 \\$MCP`));
 
     await call(bob, 'faucet');
     // price guard: bob agreed to $7, the listing says $8
     const wrong = await call(bob, 'buy', { nft_id: id1, expected_price: 7 });
     assert.equal(wrong.isError, true);
-    assert.match(wrong.text, /Price changed: .* now costs \$8\.00/);
+    assert.match(wrong.text, /Price changed: .* now costs 8 \$MCP/);
     const ok = await call(bob, 'buy', { nft_id: id1, expected_price: 8 });
     assert.equal(ok.isError, false, ok.text);
     assert.equal(await balanceOf('bob'), D(12));
@@ -153,7 +153,7 @@ export function runSuite(setup) {
 
     const nft = await call(alice, 'nft', { nft_id: id1 });
     assert.match(nft.text, /owner @bob/);
-    assert.match(nft.text, /\$8\.00 @alice → @bob/);
+    assert.match(nft.text, /8 \$MCP @alice → @bob/);
     assert.equal(nft.images.length, 1);
 
     // listing then cancel
@@ -167,7 +167,7 @@ export function runSuite(setup) {
     assert.equal((await call(alice, 'set_withdraw_address', { address: addr })).isError, false);
     assert.equal((await call(alice, 'set_withdraw_address', { address: '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM' })).isError, true);
     assert.equal((await call(alice, 'withdraw', { amount: 0.5 })).isError, true, 'below the $1 minimum');
-    assert.match((await call(alice, 'withdraw', { amount: 1 })).text, /Withdrawal #\d+ of \$1\.00 .* queued/);
+    assert.match((await call(alice, 'withdraw', { amount: 1 })).text, /Withdrawal #\d+ of 1 \$MCP .* queued/);
     assert.equal(await balanceOf('alice'), D(16.8));
     assert.equal((await call(alice, 'withdraw', { amount: 999.99 })).isError, true);
 
@@ -182,8 +182,8 @@ export function runSuite(setup) {
 
     const acct = await call(alice, 'account');
     assert.match(acct.text, /@alice/);
-    assert.match(acct.text, /Balance: \$1\.80/);
-    assert.match(acct.text, /-\$5\.00 mint MCP #/);
+    assert.match(acct.text, /Balance: 1\.80 \$MCP/);
+    assert.match(acct.text, /-5 \$MCP mint MCP #/);
   });
 
   test('refresh token rotates and the old one stops working', async () => {
@@ -266,12 +266,12 @@ export function runSuite(setup) {
     // replays credit nothing
     assert.equal((await (await hook([chain.webhookItem(sig1)], secret)).json()).credited, 0);
     const again = await deposit();
-    assert.match(again.text, /Deposits in the last 24 hours:\n\+\$25\.50 USDC/);
+    assert.match(again.text, /Deposits in the last 24 hours:\n\+25\.50 \$MCP \(25\.50 USDC, tx /);
     assert.equal(await balanceOf('dora'), D(25.5));
 
     // no webhook at all: the deposit tool finds it (USDT, receiving account in a v0 lookup table)
     chain.transfer({ mint: FAKE_USDT, to: usdtAta, owner: wallet, amount: D(10), inLookupTable: true });
-    assert.match((await deposit()).text, /New deposits:\n\+\$10\.00 USDT/);
+    assert.match((await deposit()).text, /New deposits:\n\+10 \$MCP \(10 USDT, tx /);
     assert.equal(await balanceOf('dora'), D(35.5));
 
     // not credited: dust, failed transactions, money going out, other tokens, accounts that aren't the user's
@@ -286,7 +286,7 @@ export function runSuite(setup) {
       post: [{ accountIndex: 0, mint: DEV_USDC, owner: wallet, uiTokenAmount: { amount: String(D(5)), decimals: 6 } }],
     });
     const quiet = await deposit();
-    assert.match(quiet.text, /\$0\.0009 USDC, not credited: below the \$0\.01 minimum/);
+    assert.match(quiet.text, /0\.0009 USDC received, not credited: below the 0\.01 USDC minimum/);
     assert.equal(await balanceOf('dora'), D(35.5));
 
     // a node that can't see the transaction yet: nothing is skipped, it is credited on the next check
@@ -295,7 +295,7 @@ export function runSuite(setup) {
     await deposit();
     assert.equal(await balanceOf('dora'), D(35.5));
     chain.hidden.delete(late);
-    assert.match((await deposit()).text, /New deposits:\n\+\$3\.00 USDC/);
+    assert.match((await deposit()).text, /New deposits:\n\+3 \$MCP \(3 USDC, tx /);
     assert.equal(await balanceOf('dora'), D(38.5));
 
     // one transaction paying two of our users (an exchange batch payout) credits both
@@ -310,7 +310,7 @@ export function runSuite(setup) {
     assert.equal(await balanceOf('dora'), D(39.75));
 
     const acct = await call(dora, 'account');
-    assert.match(acct.text, /\+\$1\.25 deposit USDC \(tx \w{6}…\w{4}\)/);
+    assert.match(acct.text, /\+1\.25 \$MCP deposit USDC \(tx \w{6}…\w{4}\)/);
     await ledgerMatchesBalances();
   });
 
@@ -319,7 +319,8 @@ export function runSuite(setup) {
     assert.equal(s.supply, 120);
     assert.equal(s.minted, 6, 'alice minted 5, seller minted 1');
     assert.equal(s.test_mode, true);
-    assert.equal(s.currency, 'USD');
+    assert.equal(s.currency, 'MCP');
+    assert.equal(s.usd_per_mcp, 1);
     assert.equal(s.mint_price, 5);
     assert.deepEqual(s.deposits, { network: 'solana-devnet', tokens: ['USDC', 'USDT'] });
     const listed = await fetch(`${base}/api/nfts?status=listed&sort=price_asc`).then((r) => r.json());
