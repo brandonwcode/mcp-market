@@ -11,7 +11,8 @@
     "test": "node --test --test-concurrency=1 server/test/*.test.js",
     "demo": "node --env-file-if-exists=.env server/scripts/demo-data.js",
     "smoke": "node server/scripts/smoke.js",
-    "deposit-pool": "node server/scripts/deposit-pool.js"
+    "deposit-pool": "node server/scripts/deposit-pool.js",
+    "sweep": "node server/scripts/sweep.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

@@ -37,8 +37,9 @@ These are all the tools the server exposes ([`server/src/mcp.js`](server/src/mcp
 | `my_nfts`, `market`, `nft` | look around | no |
 | `buy` | buy a listed NFT; needs the exact price you agreed to | your balance, NFT owner |
 | `sell`, `cancel_listing` | list your NFT or take it off sale | listing |
-| `set_withdraw_address` | bind a Solana address for withdrawals, **once** | your account |
-| `withdraw` | send $MCP out as USDC (1:1) to that bound address only | your balance |
+| `set_withdraw_address` | bind a Solana wallet address for withdrawals, **once** | your account |
+| `withdraw` | send $MCP out as USDC (1:1) to that bound address only; 0.5 $MCP fee | your balance |
+| `my_withdrawals` | your withdrawals, their status and transaction links | no |
 
 **It can't:**
 - see your chats, files, other connectors or anything outside this market;
@@ -99,11 +100,46 @@ The scheduled function reports how many free addresses are left and warns when t
 
 Code: [`server/src/deposits.js`](server/src/deposits.js), [`server/src/solana.js`](server/src/solana.js).
 
+## Withdrawals
+
+*"Bind my withdrawal address 7xKX…"* once, then *"withdraw 50"*: 50 USDC arrive at that address, usually within a minute, and the chat shows the transaction. The fee is 0.5 $MCP on top; the minimum is 5 $MCP.
+
+```
+deposit addresses (offline phrase) ──npm run sweep, on the owner's computer──▶ hot wallet ──USDC──▶ user's bound address
+                                                                                  ▲ the only key on the server
+```
+
+- **Two wallets.** Deposits stay in the pool addresses, which only the paper phrase controls. Payouts come from a separate **hot wallet** whose key is in `WITHDRAW_WALLET_KEY`, holding a small float (say 500 USDC and 0.1 SOL for fees). A full server takeover can take at most what is on the hot wallet. The owner tops it up with `npm run sweep` ([`server/scripts/sweep.js`](server/scripts/sweep.js)), which moves deposits to any address and pays network fees from a "fees wallet" made from the same phrase.
+- **Limits.** Paid automatically up to 100 $MCP per withdrawal, 300 per user per day and 1,000 per day in total. Anything above waits for the owner (`status = 'review'`). On top of that, a hard cap (2,000 a day by default) holds for everything, approved or not.
+- **Never twice.** Every signed transaction is stored (`withdrawal_attempts`) before it is broadcast and can't be changed or deleted afterwards. A new one is made only when every earlier one is dead: the *finalized* block height is past its last valid height plus a margin, and a status lookup from a node at least that current shows it never landed. Until then the same bytes are rebroadcast, and those can land only once. Any error from the network counts as "maybe received", and every decision is re-checked under a row lock. Only signatures the server stored itself are trusted; the memo `mcp:w:<network>:<id>` on each payout is just for people reading the chain.
+- **Safe to edit by hand.** In the table editor, `sent` and `refunded` are final, and amount, fee, address and user of a withdrawal can't be changed (database triggers).
+- **Signed rows.** Withdrawal rows and address bindings are signed (HMAC, key derived from `DEPOSIT_POOL_KEY`), and a withdrawal needs the user's balance to match their ledger. A row created or changed straight in the database is not paid, and replacing the hot wallet invalidates nothing. Someone with full control of the database could still inflate the balance of an account of their own and withdraw it; the hard daily cap and the hot wallet float limit that.
+- **Address safety.** The bound address can't be changed by the user, can't be a token account (funds sent "to" one would be lost) or one of the market's own addresses, and on the real server the first withdrawal opens 24 hours after binding.
+- **If the hot wallet runs low**, withdrawals wait in the queue and the scheduled run logs an alert; nothing is lost.
+
+**For the owner**, in Supabase → Table Editor → `withdrawals`:
+- approve a withdrawal waiting for review: set `status` to `pending` (it goes out within 5 minutes);
+- refuse it: set `status` to `rejected`; within 5 minutes (or once a transaction already sent for it can no longer land) amount and fee go back to the user and the status becomes `refunded`;
+- a payout that gave up after 5 tries shows `status = 'review'` with the reason in `error`; to try again set `status` to `pending` and `attempts` to `0`;
+- replace the hot wallet: put the new key in `WITHDRAW_WALLET_KEY` and redeploy; queued withdrawals are paid from the new one;
+- emergency stop: set `WITHDRAWALS_PAUSED=1` in Netlify and redeploy.
+
+```bash
+npm run sweep -- --network mainnet --to <hot wallet or your own wallet>          # look: what is where
+npm run sweep -- --network mainnet --to <hot wallet or your own wallet> --send   # move it
+```
+
+The destination can't be one of the pool's own addresses (Phantom's "Account 1, 2…" of the deposit phrase) or the fees wallet; the script refuses them.
+
+Code: [`server/src/withdrawals.js`](server/src/withdrawals.js), [`server/src/tx.js`](server/src/tx.js) (Solana transactions without an SDK, checked against `@solana/web3.js`).
+
 ```
 server/src/
   app.js      HTTP routes: /mcp, OAuth, public API, Helius webhook, manual credit
   mcp.js      the tools listed above
-  market.js   rules: balances, mint, listings, buys, withdrawals
+  market.js   rules: balances, mint, listings, buys
+  withdrawals.js payouts: limits, hot wallet, never-twice sending, refunds
+  tx.js       Solana transaction building and signing
   money.js    $MCP amounts <-> micro-units
   deposits.js USDC/USDT deposits: address assignment, chain checks, webhook, scheduled scan
   pool.js     the offline-made deposit address pool and its HMAC
@@ -126,7 +162,7 @@ Node 22+.
 npm install
 cp .env.example .env      # test mode, embedded database, no setup needed
 npm run demo              # optional: 8 fake traders so the site has something to show
-npm start                 # http://localhost:3000, connector at http://localhost:3000/mcp
+npm start                 # http://localhost:3000, connector at http://localhost:3000/mcp (also runs the 5-minute deposit/payout job)
 npm test                  # end-to-end tests: real OAuth, real MCP client, two users trading
 ```
 
@@ -143,8 +179,11 @@ npm test                  # end-to-end tests: real OAuth, real MCP client, two u
 | `X_CLIENT_ID`, `X_CLIENT_SECRET` | X app with OAuth 2.0, callback `PUBLIC_URL/login/x/callback` |
 | `HELIUS_API_KEY` | from [helius.dev](https://helius.dev); used for Solana RPC and the deposit webhook |
 | `DEPOSIT_POOL_KEY` | printed by `npm run deposit-pool` (see *Making the address pool*); then import the CSV into `deposit_pool` |
+| `WITHDRAW_WALLET_KEY` | the payout hot wallet's secret key (Phantom: *Export private key*). Keep only a small float on it. Withdrawals also need `DEPOSIT_POOL_KEY` (or `WITHDRAW_MAC_KEY`), which signs withdrawal rows |
 | `ADMIN_TOKEN` | optional: long random secret for manual credits (`POST /admin/deposit`); unset means off |
-| `MINT_PRICE_USD`, `MIN_WITHDRAW_USD`, `MIN_DEPOSIT_USD`, `FAUCET_USD` | optional, in $MCP (= USD), defaults 5, 1, 0.01, 20 |
+| `MINT_PRICE_USD`, `MIN_DEPOSIT_USD`, `FAUCET_USD` | optional, in $MCP (= USD), defaults 5, 0.01, 20 |
+| `MIN_WITHDRAW_USD`, `WITHDRAW_FEE`, `WITHDRAW_AUTO_MAX`, `WITHDRAW_USER_DAILY`, `WITHDRAW_DAILY`, `WITHDRAW_HARD_DAILY` | optional, defaults 5, 0.5, 100, 300, 1000, 2000 |
+| `WITHDRAW_ADDRESS_DELAY_HOURS`, `WITHDRAWALS_PAUSED` | optional: hours before a new address can receive (24; 0 on the test server), `1` stops payouts |
 
 Deposits start working once `HELIUS_API_KEY` and `DEPOSIT_POOL_KEY` are set (and deployed) and the pool CSV is imported; the scheduled function registers the Helius webhook within 5 minutes of the first address handed out.
 
@@ -156,7 +195,7 @@ Deposits start working once `HELIUS_API_KEY` and `DEPOSIT_POOL_KEY` are set (and
 - [x] Real X sign-in on the public server
 - [x] Balances in $MCP, 1 $MCP = $1
 - [x] Deposits: USDC/USDT on Solana to personal addresses, Helius webhook + scheduled scan
-- [ ] Sweep script (runs on the owner's computer) + withdrawal hot wallet with limits (queued withdrawals are already recorded)
+- [x] Withdrawals: hot wallet with limits, review queue, sweep script for the owner
 - [ ] Final collection
 
 ## Honest risks
