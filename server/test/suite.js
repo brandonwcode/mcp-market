@@ -62,7 +62,7 @@ export function runSuite(setup) {
 
   const call = async (c, name, args = {}) => {
     const r = await c.callTool({ name, arguments: args });
-    return { text: r.content.filter((x) => x.type === 'text').map((x) => x.text).join('\n'), images: r.content.filter((x) => x.type === 'image'), isError: !!r.isError };
+    return { text: r.content.filter((x) => x.type === 'text').map((x) => x.text).join('\n'), images: r.content.filter((x) => x.type === 'image'), isError: !!r.isError, sc: r.structuredContent, meta: r._meta };
   };
   const balanceOf = async (handle) => Number((await db.query('select balance from users where handle = $1', [handle]))[0].balance);
   const ledgerMatchesBalances = async () => {
@@ -115,7 +115,8 @@ export function runSuite(setup) {
     assert.equal(plain.length, 0, 'no plain-text tokens in the database');
 
     const tools = (await alice.listTools()).tools.map((t) => t.name).sort();
-    assert.deepEqual(tools, ['account', 'buy', 'cancel_listing', 'deposit', 'faucet', 'market', 'mint', 'my_nfts', 'nft', 'sell', 'set_withdraw_address', 'withdraw', 'my_withdrawals'].sort());
+    assert.deepEqual(tools, ['account', 'buy', 'cancel_listing', 'deposit', 'faucet', 'market', 'mint', 'my_nfts', 'nft', 'sell',
+      'withdraw_form', 'withdraw_form_state', 'withdraw_form_bind', 'withdraw_form_submit', 'my_withdrawals'].sort());
 
     // no money yet
     assert.equal((await call(alice, 'mint')).isError, true);
@@ -160,14 +161,25 @@ export function runSuite(setup) {
     await call(alice, 'sell', { nft_id: id2, price: 3 });
     assert.match((await call(alice, 'cancel_listing', { nft_id: id2 })).text, /no longer for sale/);
 
-    // withdrawals: address first, bound once
-    assert.equal((await call(alice, 'withdraw', { amount: 100 })).isError, true);
-    assert.equal((await call(alice, 'set_withdraw_address', { address: 'not-an-address-not-an-address-xx' })).isError, true);
+    // withdrawals (the form's buttons): address first, bound once
+    const key = () => crypto.randomBytes(16).toString('hex');
+    const form_token = (await call(alice, 'withdraw_form')).meta['mcp-market/form-token'];
+    const refusal = async (name, args, re) => {
+      const r = await call(alice, name, { form_token, ...args });
+      assert.equal(r.isError, true, r.text);
+      assert.equal(r.sc?.refused, true, `${name} says nothing happened`);
+      if (re) assert.match(r.text, re);
+    };
+    await refusal('withdraw_form_submit', { amount: 100, request_key: key() }, /Bind a withdrawal address first/);
+    await refusal('withdraw_form_bind', { address: 'not-an-address-not-an-address-xx' });
     const addr = '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU';
-    assert.equal((await call(alice, 'set_withdraw_address', { address: addr })).isError, false);
-    assert.equal((await call(alice, 'set_withdraw_address', { address: '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM' })).isError, true);
-    assert.match((await call(alice, 'withdraw', { amount: 1 })).text, /Minimum withdrawal is 5 \$MCP/);
-    assert.match((await call(alice, 'withdraw', { amount: 999.99 })).text, /Not enough \$MCP/);
+    const bound = await call(alice, 'withdraw_form_bind', { address: addr, form_token });
+    assert.equal(bound.isError, false, bound.text);
+    assert.equal(bound.sc.state.address, addr, 'the form gets the new state back');
+    await refusal('withdraw_form_bind', { address: '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM' }, /already bound/);
+    await refusal('withdraw_form_submit', { amount: 1, request_key: key() }, /Minimum withdrawal is 5 \$MCP/);
+    await refusal('withdraw_form_submit', { amount: 999.99, request_key: key() }, /Not enough \$MCP/);
+    assert.equal((await call(alice, 'withdraw_form_submit', { amount: 5, request_key: 'short', form_token })).isError, true, 'request key required');
     assert.equal(await balanceOf('alice'), D(17.8), 'refused requests take nothing');
 
     // mint limit
@@ -224,6 +236,49 @@ export function runSuite(setup) {
     assert.equal(await balanceOf('bob'), before + D(5));
   });
 
+  test('withdrawal form: the AI can only open it, the buttons are tools only the form can call', async () => {
+    const { client } = await connect('formy');
+    const { tools } = await client.listTools();
+    const by = Object.fromEntries(tools.map((t) => [t.name, t]));
+    const uri = by.withdraw_form._meta.ui.resourceUri;
+    assert.match(uri, /^ui:\/\/mcp-market\/withdraw-[0-9a-f]{12}\.html$/);
+    assert.equal(by.withdraw_form._meta['ui/resourceUri'], uri, 'legacy key for older hosts');
+    assert.equal(by.withdraw_form._meta.ui.visibility, undefined, 'the AI sees withdraw_form');
+    assert.equal(by.withdraw_form.annotations.readOnlyHint, true);
+    for (const n of ['withdraw_form_state', 'withdraw_form_bind', 'withdraw_form_submit']) {
+      assert.deepEqual(by[n]._meta.ui.visibility, ['app'], `${n} is for the form only`);
+      assert.equal(by[n]._meta.ui.resourceUri, uri);
+    }
+    // what an MCP Apps host lists for the model: nothing that binds or moves money
+    const forModel = tools.filter((t) => (t._meta?.ui?.visibility || ['model', 'app']).includes('model')).map((t) => t.name);
+    assert.ok(forModel.includes('withdraw_form') && forModel.includes('my_withdrawals'));
+    for (const n of forModel) assert.doesNotMatch(n, /bind|submit|^withdraw$|set_withdraw/);
+
+    const res = await client.readResource({ uri });
+    const page = res.contents[0];
+    assert.equal(page.mimeType, 'text/html;profile=mcp-app');
+    assert.match(page.text, /const McpApps=\(\(\)=>\{\n[\s\S]*\nreturn \{[^}]*App:\w+[^}]*\};\n\}\)\(\);/, 'SDK inlined in its own scope');
+    assert.doesNotMatch(page.text, /MCP_APPS_SDK/);
+    assert.doesNotMatch(page.text, /<script[^>]+src=/i, 'loads no outside scripts');
+    assert.deepEqual(page._meta.ui.csp, { connectDomains: [], resourceDomains: [] });
+    assert.equal(page._meta.ui.prefersBorder, true);
+    assert.ok((await client.listResources()).resources.some((r) => r.uri === uri));
+
+    assert.equal(by.withdraw_form.inputSchema.properties.address, undefined, 'the AI can not pre-fill an address');
+    const old = await client.readResource({ uri: 'ui://mcp-market/withdraw-000000000000.html' });
+    assert.equal(old.contents[0].text, page.text, 'a chat opened before a deploy still gets the form');
+    const r = await call(client, 'withdraw_form', { amount: 5 });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(r.sc.state.v, 1);
+    assert.deepEqual(r.sc.state.prefill, { amount: 5 });
+    assert.equal(r.sc.state.address, null);
+    assert.equal(r.sc.state.fee, 0.5);
+    assert.equal(r.sc.state.min, 5);
+    assert.match(r.text, /Nothing is sent or bound until the user presses the button in the form/);
+    const [u] = await db.query("select withdraw_address from users where handle = 'formy'");
+    assert.equal(u.withdraw_address, null);
+  });
+
   test('withdrawals through the chat: paid on chain, big ones wait, rejected ones come back', async () => {
     const { client: wendy } = await connect('wendy');
     const fund = await fetch(`${base}/admin/deposit`, {
@@ -233,19 +288,52 @@ export function runSuite(setup) {
     assert.equal(fund.status, 200);
     const [w] = await db.query("select id from users where handle = 'wendy'");
     const tokenAccount = chain.fund(randomAddress(), DEV_USDC, 1);
-    assert.match((await call(wendy, 'set_withdraw_address', { address: tokenAccount })).text, /token account, not a wallet/);
+    const form = await call(wendy, 'withdraw_form', { amount: 50 });
+    assert.equal(form.sc.state.address, null);
+    assert.match(form.text, /No withdrawal address yet/);
+    const form_token = form.meta['mcp-market/form-token'];
+    assert.match(form_token, /^\d{13}\.[0-9a-f]{64}$/, 'the form gets its pass in _meta');
+    assert.doesNotMatch(JSON.stringify(form.sc) + form.text, /[0-9a-f]{64}/, 'and the pass is not in what the AI reads');
+    assert.match((await call(wendy, 'withdraw_form_bind', { address: tokenAccount, form_token })).text, /token account, not a wallet/);
     const addr = randomAddress();
-    assert.match((await call(wendy, 'set_withdraw_address', { address: addr })).text, /Withdrawal address bound/);
 
-    const paid = await call(wendy, 'withdraw', { amount: 50 });
+    // without the form's pass (an assistant calling the buttons itself in an app that ignores visibility): refused
+    for (const t of [undefined, '', '1234567890123.' + 'ab'.repeat(32), `${Date.now() - 1000}.${'0'.repeat(64)}`]) {
+      const r = await call(wendy, 'withdraw_form_bind', { address: addr, ...(t === undefined ? {} : { form_token: t }) });
+      assert.equal(r.isError, true, String(t));
+    }
+    const other = (await call((await connect('mallory')).client, 'withdraw_form')).meta['mcp-market/form-token'];
+    assert.match((await call(wendy, 'withdraw_form_bind', { address: addr, form_token: other })).text, /expired/, "another user's pass");
+    assert.equal((await db.query('select withdraw_address from users where id = $1', [w.id]))[0].withdraw_address, null, 'nothing bound');
+
+    assert.match((await call(wendy, 'withdraw_form_bind', { address: addr, form_token })).text, /Withdrawal address bound/);
+
+    const k1 = crypto.randomBytes(16).toString('hex');
+    const noPass = await call(wendy, 'withdraw_form_submit', { amount: 50, request_key: k1, form_token: other });
+    assert.equal(noPass.sc.refused, true);
+    assert.equal(await balanceOf('wendy'), D(400), 'nothing taken without the pass');
+    const paid = await call(wendy, 'withdraw_form_submit', { amount: 50, request_key: k1, form_token });
     assert.equal(paid.isError, false, paid.text);
-    assert.match(paid.text, new RegExp(`Done: 50 USDC sent to ${addr} on Solana devnet`));
+    assert.match(paid.text, new RegExp(`Sent: 50 USDC to ${addr} on Solana devnet`));
     assert.match(paid.text, /https:\/\/solscan\.io\/tx\/\w+\?cluster=devnet/);
     assert.match(paid.text, /Fee: 0\.50 \$MCP\. Balance: 349\.50 \$MCP/);
+    assert.equal(paid.sc.withdrawal.status, 'sent');
+    assert.match(paid.sc.withdrawal.explorer, /\?cluster=devnet$/);
+    assert.equal(paid.sc.state.balance, 349.5);
     assert.equal(chain.tokenBalance(addr, DEV_USDC), BigInt(D(50)), 'the USDC arrived');
 
-    const big = await call(wendy, 'withdraw', { amount: 150 });
-    assert.match(big.text, /above the automatic limit.*manual check/);
+    // the same confirmation again (an answer lost on the way, a double click, a replay): the same withdrawal, nothing new
+    const again = await Promise.all([1, 2, 3].map(() => call(wendy, 'withdraw_form_submit', { amount: 50, request_key: k1, form_token })));
+    for (const r of again) assert.equal(r.sc.withdrawal.id, paid.sc.withdrawal.id);
+    assert.equal(chain.tokenBalance(addr, DEV_USDC), BigInt(D(50)), 'paid once');
+    assert.equal(await balanceOf('wendy'), D(349.5), 'debited once');
+    assert.equal((await db.query('select count(*)::int as n from withdrawals where user_id = $1', [w.id]))[0].n, 1);
+
+    const look = await call(wendy, 'withdraw_form_state', { request_key: k1 });
+    assert.equal(look.sc.by_key.id, paid.sc.withdrawal.id, 'the form can ask what happened to its request');
+    const big = await call(wendy, 'withdraw_form_submit', { amount: 150, request_key: crypto.randomBytes(16).toString('hex'), form_token });
+    assert.match(big.text, /waits for a manual check \(above the automatic limit\)/);
+    assert.equal(big.sc.withdrawal.status, 'review');
     assert.equal(await balanceOf('wendy'), D(349.5 - 150.5), 'reserved while it waits');
     const list = (await call(wendy, 'my_withdrawals')).text;
     assert.match(list, /50 USDC to \w{4}…\w{4} · sent · https:\/\/solscan/);
