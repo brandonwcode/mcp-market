@@ -1,8 +1,8 @@
 {
   "name": "mcp-market",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "$MCP: an NFT market that lives inside AI chats. Open-source MCP server for Claude and ChatGPT.",
+  "description": "$MCP: an NFT market that lives inside AI chats, with USDC/USDT deposits on Solana. Open-source MCP server for Claude and ChatGPT.",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -10,10 +10,14 @@
     "build": "node server/scripts/build.js",
     "test": "node --test --test-concurrency=1 server/test/*.test.js",
     "demo": "node --env-file-if-exists=.env server/scripts/demo-data.js",
-    "smoke": "node server/scripts/smoke.js"
+    "smoke": "node server/scripts/smoke.js",
+    "deposit-pool": "node server/scripts/deposit-pool.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
+    "@noble/curves": "^1.9.7",
+    "@scure/base": "^1.2.6",
+    "@scure/bip39": "^1.6.0",
     "express": "^5.3.0",
     "pg": "^8.23.1",
     "serverless-http": "^4.0.0",

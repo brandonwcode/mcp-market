@@ -19,8 +19,14 @@
 **Database** — [`server/src/schema.js`](server/src/schema.js)
 - Only the server talks to Postgres. Supabase's auto-generated REST API is turned off for this project, and as a second layer every table has row level security with no policies, so the public API roles can't read anything even if it's switched on.
 
-**Deposit webhook**
-- `POST /admin/deposit` needs `ADMIN_TOKEN` (constant-time comparison) and is off when it's unset. One transaction signature is credited once.
+**Deposits** — [`server/src/deposits.js`](server/src/deposits.js)
+- Each user deposits to their own Solana address from a pool made offline on the owner's computer (`npm run deposit-pool`). The seed phrase stays on paper; the server holds only public addresses and has no key that can move deposited funds.
+- Every pool address is signed with `DEPOSIT_POOL_KEY` (HMAC of network, index and address). The server never shows or credits an address whose signature fails, so database write access alone can't redirect deposits; a failing row is set aside and logged as an alert.
+- Nothing is credited because a webhook says so. Every transaction is fetched from the chain and checked: real USDC/USDT mint, the user's own token account, owner equals the user's deposit wallet, successful transaction, amount from the chain's balances.
+- Each (transaction, token account) pair is credited once, enforced by a unique key, so webhook replays, retries and parallel scans can't double-credit. Tests cover forged payloads, replays, failed transactions, fake mints, wrong owners, forged pool rows, dust and lagging nodes.
+- The Helius webhook must present a password (derived from the pool key, compared in constant time).
+- The test server only accepts devnet tokens and the real server only mainnet ones, so free test money and real money never share a balance.
+- `POST /admin/deposit` (manual credits for support) needs `ADMIN_TOKEN` and is off when it's unset. One reference is credited once.
 
 ## Test server caveats
 
