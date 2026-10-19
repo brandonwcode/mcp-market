@@ -7,7 +7,8 @@ process.env.ADMIN_TOKEN = 'admin-secret';
 const { createApp } = await import('../src/app.js');
 const { openDb } = await import('../src/db.js');
 const { runSuite } = await import('./suite.js');
-const { fakeChain, testDepositConfig, seedPool } = await import('./fakechain.js');
+const { fakeChain, testDepositConfig, testWithdrawConfig, seedPool, TEST_HOT, DEV_USDC } = await import('./fakechain.js');
+const { createCronHandler } = await import('../src/cron.js');
 
 const s = runSuite(async () => {
   const db = await openDb({ url: process.env.TEST_DATABASE_URL || '' });
@@ -15,9 +16,13 @@ const s = runSuite(async () => {
   const base = `http://127.0.0.1:${port}`;
   const chain = fakeChain();
   await seedPool(db);
-  const { app } = await createApp({ db, publicUrl: base, devLogin: true, rpc: chain.rpc, helius: chain.helius, depositConfig: testDepositConfig() });
+  chain.fund(TEST_HOT.publicKey, DEV_USDC, 1000e6); // the payout hot wallet
+  const chainOpts = { rpc: chain.rpc, helius: chain.helius, depositConfig: testDepositConfig(), withdrawConfig: testWithdrawConfig() };
+  const { app } = await createApp({ db, publicUrl: base, devLogin: true, ...chainOpts });
   const server = await new Promise((r) => { const sv = app.listen(port, () => r(sv)); });
-  return { base, db, chain, close: async () => { server.close(); await db.close(); } };
+  const cronHandler = createCronHandler({ db, publicUrl: base, ...chainOpts });
+  const cron = async () => JSON.parse((await cronHandler({}, {})).body);
+  return { base, db, chain, cron, close: async () => { server.close(); await db.close(); } };
 });
 
 test('local server also serves the site and images', async () => {

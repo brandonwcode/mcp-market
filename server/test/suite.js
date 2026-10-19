@@ -12,9 +12,9 @@ import { TEST_SEED, TEST_POOL_KEY, DEV_USDC, FAKE_USDT, randomAddress } from './
 const D = (dollars) => Math.round(dollars * 1e6); // dollars to micro-dollars, as stored
 
 export function runSuite(setup) {
-  let base, db, close, chain;
+  let base, db, close, chain, cron;
 
-  before(async () => { ({ base, db, close, chain } = await setup()); });
+  before(async () => { ({ base, db, close, chain, cron } = await setup()); });
   after(async () => { await close?.(); });
 
   const cookieOf = (res) => (res.headers.getSetCookie?.() || []).map((c) => c.split(';')[0]).join('; ');
@@ -115,7 +115,7 @@ export function runSuite(setup) {
     assert.equal(plain.length, 0, 'no plain-text tokens in the database');
 
     const tools = (await alice.listTools()).tools.map((t) => t.name).sort();
-    assert.deepEqual(tools, ['account', 'buy', 'cancel_listing', 'deposit', 'faucet', 'market', 'mint', 'my_nfts', 'nft', 'sell', 'set_withdraw_address', 'withdraw'].sort());
+    assert.deepEqual(tools, ['account', 'buy', 'cancel_listing', 'deposit', 'faucet', 'market', 'mint', 'my_nfts', 'nft', 'sell', 'set_withdraw_address', 'withdraw', 'my_withdrawals'].sort());
 
     // no money yet
     assert.equal((await call(alice, 'mint')).isError, true);
@@ -166,10 +166,9 @@ export function runSuite(setup) {
     const addr = '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU';
     assert.equal((await call(alice, 'set_withdraw_address', { address: addr })).isError, false);
     assert.equal((await call(alice, 'set_withdraw_address', { address: '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM' })).isError, true);
-    assert.equal((await call(alice, 'withdraw', { amount: 0.5 })).isError, true, 'below the $1 minimum');
-    assert.match((await call(alice, 'withdraw', { amount: 1 })).text, /Withdrawal #\d+ of 1 \$MCP .* queued/);
-    assert.equal(await balanceOf('alice'), D(16.8));
-    assert.equal((await call(alice, 'withdraw', { amount: 999.99 })).isError, true);
+    assert.match((await call(alice, 'withdraw', { amount: 1 })).text, /Minimum withdrawal is 5 \$MCP/);
+    assert.match((await call(alice, 'withdraw', { amount: 999.99 })).text, /Not enough \$MCP/);
+    assert.equal(await balanceOf('alice'), D(17.8), 'refused requests take nothing');
 
     // mint limit
     for (let i = 0; i < 3; i++) await call(alice, 'mint');
@@ -182,7 +181,7 @@ export function runSuite(setup) {
 
     const acct = await call(alice, 'account');
     assert.match(acct.text, /@alice/);
-    assert.match(acct.text, /Balance: 1\.80 \$MCP/);
+    assert.match(acct.text, /Balance: 2\.80 \$MCP/);
     assert.match(acct.text, /-5 \$MCP mint MCP #/);
   });
 
@@ -223,6 +222,46 @@ export function runSuite(setup) {
     assert.deepEqual(await (await post({ handle: 'bob', amount: 5, tx: 'sig1' }, 'admin-secret')).json(), { duplicate: false });
     assert.deepEqual(await (await post({ handle: 'bob', amount: 5, tx: 'sig1' }, 'admin-secret')).json(), { duplicate: true });
     assert.equal(await balanceOf('bob'), before + D(5));
+  });
+
+  test('withdrawals through the chat: paid on chain, big ones wait, rejected ones come back', async () => {
+    const { client: wendy } = await connect('wendy');
+    const fund = await fetch(`${base}/admin/deposit`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer admin-secret' },
+      body: JSON.stringify({ handle: 'wendy', amount: 400, tx: 'fund-wendy' }),
+    });
+    assert.equal(fund.status, 200);
+    const [w] = await db.query("select id from users where handle = 'wendy'");
+    const tokenAccount = chain.fund(randomAddress(), DEV_USDC, 1);
+    assert.match((await call(wendy, 'set_withdraw_address', { address: tokenAccount })).text, /token account, not a wallet/);
+    const addr = randomAddress();
+    assert.match((await call(wendy, 'set_withdraw_address', { address: addr })).text, /Withdrawal address bound/);
+
+    const paid = await call(wendy, 'withdraw', { amount: 50 });
+    assert.equal(paid.isError, false, paid.text);
+    assert.match(paid.text, new RegExp(`Done: 50 USDC sent to ${addr} on Solana devnet`));
+    assert.match(paid.text, /https:\/\/solscan\.io\/tx\/\w+\?cluster=devnet/);
+    assert.match(paid.text, /Fee: 0\.50 \$MCP\. Balance: 349\.50 \$MCP/);
+    assert.equal(chain.tokenBalance(addr, DEV_USDC), BigInt(D(50)), 'the USDC arrived');
+
+    const big = await call(wendy, 'withdraw', { amount: 150 });
+    assert.match(big.text, /above the automatic limit.*manual check/);
+    assert.equal(await balanceOf('wendy'), D(349.5 - 150.5), 'reserved while it waits');
+    const list = (await call(wendy, 'my_withdrawals')).text;
+    assert.match(list, /50 USDC to \w{4}…\w{4} · sent · https:\/\/solscan/);
+    assert.match(list, /150 USDC to \w{4}…\w{4} · waiting for a manual check/);
+
+    // the owner rejects it in the database; the next scheduled run gives it back
+    await db.query("update withdrawals set status = 'rejected' where user_id = $1 and status = 'review'", [w.id]);
+    const run = await cron();
+    assert.equal(run.withdrawals.refunded, 1);
+    assert.equal(await balanceOf('wendy'), D(349.5));
+    assert.match((await call(wendy, 'my_withdrawals')).text, /rejected, refunded to your balance/);
+    assert.equal(run.withdrawals.errors.length, 0, JSON.stringify(run.withdrawals.errors));
+    const acct = (await call(wendy, 'account')).text;
+    assert.match(acct, /-50 \$MCP withdraw #\d+/);
+    assert.match(acct, /\+150\.50 \$MCP withdraw_refund #\d+/, "amount and fee back in one ledger row");
+    await ledgerMatchesBalances();
   });
 
   test('deposits: personal address, webhook, on-demand check, each transaction credited once', async () => {
@@ -307,6 +346,14 @@ export function runSuite(setup) {
     const both = chain.batch(DEV_USDC, [{ to: eveAta, owner: e.address, amount: D(7) }, { to: usdcAta, owner: wallet, amount: D(1.25) }]);
     assert.equal((await (await hook([chain.webhookItem(both)], secret)).json()).credited, 2);
     assert.equal(await balanceOf('eve'), D(7));
+    assert.equal(await balanceOf('dora'), D(39.75));
+
+    // support can't credit by hand what the scanner already credited, even pasted as an explorer link
+    const manual = await fetch(`${base}/admin/deposit`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer admin-secret' },
+      body: JSON.stringify({ handle: 'dora', amount: 25.5, tx: ` https://solscan.io/tx/${sig1}?cluster=devnet ` }),
+    });
+    assert.equal(manual.status, 409);
     assert.equal(await balanceOf('dora'), D(39.75));
 
     const acct = await call(dora, 'account');

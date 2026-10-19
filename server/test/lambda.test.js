@@ -9,7 +9,8 @@ process.env.ADMIN_TOKEN = 'admin-secret';
 const { createHandler } = await import('../src/lambda.js');
 const { openDb } = await import('../src/db.js');
 const { runSuite } = await import('./suite.js');
-const { fakeChain, testDepositConfig, seedPool } = await import('./fakechain.js');
+const { fakeChain, testDepositConfig, testWithdrawConfig, seedPool, TEST_HOT, DEV_USDC } = await import('./fakechain.js');
+const { createCronHandler } = await import('../src/cron.js');
 
 // turn a real HTTP request into a Netlify Functions (Lambda v1) event and back
 function shim(handler) {
@@ -59,10 +60,14 @@ const s = runSuite(async () => {
   const base = `http://127.0.0.1:${port}`;
   const chain = fakeChain();
   await seedPool(db);
-  const handler = createHandler({ db, publicUrl: base, devLogin: true, rpc: chain.rpc, helius: chain.helius, depositConfig: testDepositConfig() });
+  chain.fund(TEST_HOT.publicKey, DEV_USDC, 1000e6); // the payout hot wallet
+  const chainOpts = { rpc: chain.rpc, helius: chain.helius, depositConfig: testDepositConfig(), withdrawConfig: testWithdrawConfig() };
+  const handler = createHandler({ db, publicUrl: base, devLogin: true, ...chainOpts });
   const server = shim(handler);
   await new Promise((r) => server.listen(port, r));
-  return { base, db, chain, close: async () => { server.close(); await db.close(); } };
+  const cronHandler = createCronHandler({ db, publicUrl: base, ...chainOpts });
+  const cron = async () => JSON.parse((await cronHandler({}, {})).body);
+  return { base, db, chain, cron, close: async () => { server.close(); await db.close(); } };
 });
 
 test('serverless: static files are left to the CDN', async () => {

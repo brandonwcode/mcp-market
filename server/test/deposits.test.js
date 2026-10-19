@@ -13,7 +13,7 @@ import { poolKeyFromSeed, poolRowValid, parsePoolCsv } from '../src/pool.js';
 import { createCronHandler } from '../src/cron.js';
 import { openDb } from '../src/db.js';
 import { migrate } from '../src/schema.js';
-import { upsertUser } from '../src/market.js';
+import { upsertUser, credit } from '../src/market.js';
 import { fakeChain, testDepositConfig, seedPool, randomAddress, TEST_MNEMONIC, TEST_SEED, TEST_POOL_KEY, DEV_USDC } from './fakechain.js';
 
 const D = (dollars) => Math.round(dollars * 1e6);
@@ -199,12 +199,55 @@ test('crediting: only into token accounts of a verified pool address', async () 
   assert.equal(await bal(), D(1), 'forged pool row');
   await db.query('update deposit_pool set address = $1 where network = $2 and idx = $3', [w.address, row.network, row.idx]);
 
+  // money moved between two of our own pool addresses (the owner sweeping by mistake into a pool address)
+  // is not a deposit
+  const other2 = await upsertUser(db, { xId: 'dev:other2', handle: 'other2' });
+  const w2 = await dep.wallet(other2.id);
+  const from = w2.accounts[0].address;
+  chain.addTx({
+    accountKeys: [randomAddress(), from, ata],
+    pre: [{ accountIndex: 1, mint: DEV_USDC, owner: w2.address, uiTokenAmount: { amount: String(D(70)), decimals: 6 } },
+      { accountIndex: 2, mint: DEV_USDC, owner: w.address, uiTokenAmount: { amount: String(D(1)), decimals: 6 } }],
+    post: [{ accountIndex: 1, mint: DEV_USDC, owner: w2.address, uiTokenAmount: { amount: '0', decimals: 6 } },
+      { accountIndex: 2, mint: DEV_USDC, owner: w.address, uiTokenAmount: { amount: String(D(71)), decimals: 6 } }],
+  });
+  await dep.scanUser(u.id, { force: true });
+  assert.equal(await bal(), D(1), 'internal transfer');
+
+  // support credited a deposit by hand; when the scanner finds the same transaction later, it doesn't credit again
+  const sig = chain.transfer({ mint: DEV_USDC, to: ata, owner: w.address, amount: D(3), before: D(71) });
+  await credit(db, u.id, D(3), 'deposit', `manual ${sig}`);
+  await dep.scanUser(u.id, { force: true });
+  assert.equal(await bal(), D(4), 'credited once, by support');
+  assert.equal((await db.query('select status from deposits where signature = $1', [sig]))[0].status, 'manual');
+  // a manual credit for one user doesn't swallow another user's part of the same transaction
+  const third = await upsertUser(db, { xId: 'dev:third', handle: 'third' });
+  const w3 = await dep.wallet(third.id);
+  const both = chain.batch(DEV_USDC, [{ to: w3.accounts[0].address, owner: w3.address, amount: D(2) }, { to: ata, owner: w.address, amount: D(1) }]);
+  await credit(db, u.id, D(1), 'deposit', `manual ${both}`);
+  await dep.scanUser(third.id, { force: true });
+  await dep.scanUser(u.id, { force: true });
+  assert.equal(Number((await db.query('select balance from users where id = $1', [third.id]))[0].balance), D(2));
+  assert.equal(await bal(), D(5));
+  // a pool row that fails its signature doesn't make a sender "ours": that deposit is credited normally
+  const fakeOwner = randomAddress();
+  await db.query("insert into deposit_pool (network, idx, address, mac) values ('devnet', 500, $1, $2)", [fakeOwner, 'ab'.repeat(32)]);
+  chain.addTx({
+    accountKeys: [randomAddress(), randomAddress(), ata],
+    pre: [{ accountIndex: 1, mint: DEV_USDC, owner: fakeOwner, uiTokenAmount: { amount: String(D(9)), decimals: 6 } },
+      { accountIndex: 2, mint: DEV_USDC, owner: w.address, uiTokenAmount: { amount: String(D(1)), decimals: 6 } }],
+    post: [{ accountIndex: 1, mint: DEV_USDC, owner: fakeOwner, uiTokenAmount: { amount: '0', decimals: 6 } },
+      { accountIndex: 2, mint: DEV_USDC, owner: w.address, uiTokenAmount: { amount: String(D(10)), decimals: 6 } }],
+  });
+  await dep.scanUser(u.id, { force: true });
+  assert.equal(await bal(), D(14));
+
   // the pool row reassigned to another user in the database: the deposit is not credited to either
   const v = await upsertUser(db, { xId: 'dev:victim', handle: 'victim' });
   await db.query("update deposit_pool set user_id = $1 where address = $2", [v.id, w.address]);
   chain.transfer({ mint: DEV_USDC, to: ata, owner: w.address, amount: D(5), before: D(1) });
   await dep.scanUser(u.id, { force: true });
-  assert.equal(await bal(), D(1));
+  assert.equal(await bal(), D(14));
   await db.close();
 });
 
@@ -323,19 +366,21 @@ test('migration: old whole-$MCP amounts become dollars once (1 old unit = 1 cent
   await db.query("insert into ledger (user_id, delta, kind, ref) values ($1, 2000, 'faucet', 'test'), ($1, -500, 'mint', '1'), (null, 500, 'mint', '1'), ($1, 180, 'sale', '2')", [u.id]);
   await db.query("insert into nfts (id, name, character, shape, palette, rarity, owner_id, price) values (9001, 'x', 'Scarf', 's', 'p', 'common', $1, 999)", [u.id]);
   await db.query("insert into withdrawals (user_id, amount, address) values ($1, 100, 'addr')", [u.id]);
-  await db.query("delete from app_meta where key = 'data:usd-micro'");
+  await db.query("delete from app_meta where key in ('data:usd-micro', 'data:withdraw-v2')");
   await db.query("update app_meta set value = 'old' where key = 'schema'");
 
   assert.equal(await migrate(db), true);
-  assert.equal(Number((await db.query('select balance from users where id = $1', [u.id]))[0].balance), D(16.8));
+  // 16.80 in dollars, plus the 1.00 withdrawal that was queued before payouts existed, refunded
+  assert.equal(Number((await db.query('select balance from users where id = $1', [u.id]))[0].balance), D(17.8));
   assert.equal(Number((await db.query('select price from nfts where id = 9001'))[0].price), D(9.99));
-  assert.equal(Number((await db.query('select amount from withdrawals'))[0].amount), D(1));
+  const [wr] = await db.query('select amount, status from withdrawals');
+  assert.deepEqual([Number(wr.amount), wr.status], [D(1), 'refunded']);
   const [{ s }] = await db.query('select sum(delta)::bigint as s from ledger where user_id = $1', [u.id]);
-  assert.equal(Number(s), D(16.8));
+  assert.equal(Number(s), D(17.8));
 
   // never twice
   await db.query("update app_meta set value = 'old' where key = 'schema'");
   await migrate(db);
-  assert.equal(Number((await db.query('select balance from users where id = $1', [u.id]))[0].balance), D(16.8));
+  assert.equal(Number((await db.query('select balance from users where id = $1', [u.id]))[0].balance), D(17.8));
   await db.close();
 });
