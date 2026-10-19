@@ -37,14 +37,18 @@ These are all the tools the server exposes ([`server/src/mcp.js`](server/src/mcp
 | `my_nfts`, `market`, `nft` | look around | no |
 | `buy` | buy a listed NFT; needs the exact price you agreed to | your balance, NFT owner |
 | `sell`, `cancel_listing` | list your NFT or take it off sale | listing |
-| `set_withdraw_address` | bind a Solana wallet address for withdrawals, **once** | your account |
-| `withdraw` | send $MCP out as USDC (1:1) to that bound address only; 0.5 $MCP fee | your balance |
+| `withdraw_form` | shows the withdrawal form in the chat (below) | no |
 | `my_withdrawals` | your withdrawals, their status and transaction links | no |
+
+**Withdrawals happen in a form, not by the AI.** The AI only opens the form ([MCP Apps](https://github.com/modelcontextprotocol/ext-apps), an interactive card inside Claude and ChatGPT). In it you paste your Solana wallet address and bind it **once**, enter the amount and press *Withdraw*, then *Confirm*: it arrives as USDC (1:1), the 0.5 $MCP fee is charged on top.
+- The form's buttons are tools of their own (`withdraw_form_state`, `withdraw_form_bind`, `withdraw_form_submit`) marked `visibility: ["app"]`: apps that follow the MCP Apps spec keep them out of the AI's tool list, so the AI can't withdraw or bind an address, even if a web page or file tries to talk it into it.
+- For apps that ignore that, the buttons also need the form's pass: a short-lived signed token that comes with the form in the tool result's `_meta`, which is for the form and not for the AI's context. The AI can't pre-fill an address either.
+- Apps that can't show forms can't withdraw; use Claude (web, desktop, mobile) or ChatGPT.
 
 **It can't:**
 - see your chats, files, other connectors or anything outside this market;
 - post on X, read your DMs or follow anyone: the X login asks only for `users.read tweet.read`, to learn your handle and avatar;
-- send money anywhere except the one withdrawal address you bound yourself. Changing it needs support, so a prompt-injected AI can't redirect your funds.
+- send money at all: withdrawals need your click in the withdrawal form, and go only to the one address you bound there yourself. Changing it needs support.
 
 **What the server stores:** your X id, handle, name and avatar; your balance, NFTs and a ledger of every balance change. OAuth codes and tokens are kept only as sha256 hashes. See [SECURITY.md](SECURITY.md) for the full list of protections.
 

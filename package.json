@@ -15,6 +15,7 @@
     "sweep": "node server/scripts/sweep.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@noble/curves": "^1.9.7",
     "@scure/base": "^1.2.6",

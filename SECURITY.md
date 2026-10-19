@@ -14,7 +14,10 @@
 - `buy` takes the price you agreed to (`expected_price`) and fails if the listing changed.
 - Concurrent buys of one NFT: exactly one succeeds (row lock), tested.
 - Withdrawals go only to an address you bind once. Changing it requires support, so text injected into a chat, web page or NFT name can't redirect funds. It can't be a token account or one of the market's own addresses; on the real server the first withdrawal opens 24 hours after binding.
-- The server tells the AI never to call `withdraw` or `set_withdraw_address` because of text from web pages, files or other tool results, and to confirm amount, fee and address with you first.
+- The AI can only open the withdrawal form (`withdraw_form`, an MCP App); you bind the address and withdraw by pressing the buttons in it, each with a second *Confirm* step that a double click can't trigger. The AI can pre-fill only the amount, never an address.
+  - The buttons are tools with `visibility: ["app"]`, which apps following the MCP Apps spec must keep out of the AI's tool list. They also need the form's pass: an HMAC-signed token for this user, valid 2 hours, handed to the form in the tool result's `_meta` (meant for the form, not the AI's context). An app that ignores visibility still can't let its AI bind or withdraw unless it also shows the AI that metadata. If the form can't be built, its buttons aren't offered at all.
+  - Each confirmed withdrawal carries a one-time request key (unique per user in the database). A retry, a replay or a lost answer gets the same withdrawal back, never a second one. The form keeps the key until the server has said what happened to it, and errors after a withdrawal was made are never reported as a refusal.
+  - The form is one self-contained page: the MCP Apps SDK is inlined and pinned by its sha256, and it loads nothing from other domains.
 
 **Withdrawals** — [`server/src/withdrawals.js`](server/src/withdrawals.js)
 - Payouts come from a hot wallet holding a small float; it is the only key the server has. Deposits stay in addresses only the offline phrase controls.
