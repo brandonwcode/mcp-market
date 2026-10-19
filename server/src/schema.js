@@ -3,7 +3,7 @@
 // instances never race each other.
 import crypto from 'node:crypto';
 
-// Amounts are whole $MCP tokens.
+// Amounts are integer micro-dollars (1 USD = 1,000,000), like USDC/USDT on Solana. See money.js.
 export const SCHEMA = `
 create table if not exists app_meta (
   key text primary key,
@@ -17,7 +17,7 @@ create table if not exists users (
   name text,
   avatar text,
   balance bigint not null default 0 check (balance >= 0),
-  deposit_address text,                 -- personal Solana address for deposits (filled by the deposit watcher)
+  deposit_address text,                 -- unused: deposit addresses live in deposit_pool
   withdraw_address text,                -- bound once; changing it needs support
   created_at timestamptz not null default now()
 );
@@ -47,6 +47,48 @@ create table if not exists ledger (
 );
 create index if not exists ledger_user on ledger(user_id, id desc);
 create unique index if not exists ledger_deposit_tx on ledger(ref) where kind = 'deposit';
+
+-- Deposits. deposit_pool holds public Solana addresses made offline from a phrase the server never sees
+-- (server/scripts/deposit-pool.js, imported as CSV). Each user gets one. We watch its USDC and USDT token
+-- accounts and credit what arrives. Each (transaction, token account) is credited at most once.
+create table if not exists deposit_pool (
+  network text not null,                -- mainnet | devnet
+  idx int not null,                     -- the phrase's wallet number: m/44'/501'/idx'/0'
+  address text not null unique,
+  mac text not null,                    -- HMAC of network:idx:address with DEPOSIT_POOL_KEY (see pool.js)
+  user_id int references users(id),
+  assigned_at timestamptz,
+  primary key (network, idx)
+);
+create unique index if not exists deposit_pool_user on deposit_pool(network, user_id);
+create index if not exists deposit_pool_free on deposit_pool(network, idx) where user_id is null;
+
+alter table users add column if not exists deposit_watch_until timestamptz; -- scan often until then
+
+create table if not exists deposit_accounts (
+  address text primary key,             -- the pool address's associated token account for one stablecoin
+  user_id int not null references users(id),
+  wallet text not null,                 -- the pool address that owns it
+  token text not null,                  -- USDC | USDT
+  mint text not null,
+  cursor text,                          -- newest transaction signature already processed
+  checked_at timestamptz
+);
+create index if not exists deposit_accounts_user on deposit_accounts(user_id);
+
+create table if not exists deposits (
+  id bigserial primary key,
+  user_id int not null references users(id),
+  signature text not null,
+  token text not null,
+  token_account text not null,
+  amount bigint not null,               -- micro-dollars
+  slot bigint,
+  status text not null,                 -- credited | too_small
+  created_at timestamptz not null default now(),
+  unique (signature, token_account)
+);
+create index if not exists deposits_user on deposits(user_id, id desc);
 
 create table if not exists sales (
   id bigserial primary key,
@@ -105,6 +147,9 @@ alter table nfts enable row level security;
 alter table ledger enable row level security;
 alter table sales enable row level security;
 alter table withdrawals enable row level security;
+alter table deposit_pool enable row level security;
+alter table deposit_accounts enable row level security;
+alter table deposits enable row level security;
 alter table oauth_clients enable row level security;
 alter table oauth_pending enable row level security;
 alter table oauth_codes enable row level security;
@@ -117,7 +162,19 @@ do $$ begin
 end $$;
 `;
 
-const VERSION = crypto.createHash('sha256').update(SCHEMA).digest('hex').slice(0, 16);
+// One-time data changes, applied once each, in order, under the same lock as the schema.
+const DATA_MIGRATIONS = [
+  // 2026-10-19: the currency moved from whole $MCP test tokens to US dollars. 1 old token = 1 cent,
+  // so the old mint price of 500 becomes $5.00 and a sale at 999 becomes $9.99.
+  ['usd-micro', `
+    update users set balance = balance * 10000;
+    update ledger set delta = delta * 10000;
+    update nfts set price = price * 10000 where price is not null;
+    update sales set price = price * 10000;
+    update withdrawals set amount = amount * 10000;`],
+];
+
+const VERSION = crypto.createHash('sha256').update(SCHEMA + DATA_MIGRATIONS.map(([k]) => k).join(',')).digest('hex').slice(0, 16);
 
 async function appliedVersion(q) {
   const [r] = await q("select to_regclass('app_meta') is not null as ok");
@@ -132,6 +189,13 @@ export async function migrate(db) {
     await t.query('select pg_advisory_xact_lock(727274001)');
     if (await appliedVersion(t.query) === VERSION) return;
     await t.exec(SCHEMA);
+    for (const [name, sql] of DATA_MIGRATIONS) {
+      const key = `data:${name}`;
+      const [done] = await t.query('select 1 from app_meta where key = $1', [key]);
+      if (done) continue;
+      await t.exec(sql);
+      await t.query('insert into app_meta (key, value) values ($1, now()::text)', [key]);
+    }
     await t.query("insert into app_meta (key, value) values ('schema', $1) on conflict (key) do update set value = excluded.value", [VERSION]);
   });
   return true;

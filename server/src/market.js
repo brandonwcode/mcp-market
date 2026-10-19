@@ -1,20 +1,25 @@
 // Market rules: balances, mint, listings, buys, withdrawals. Every balance change writes a ledger row
 // in the same transaction, so sum(ledger) per user always equals users.balance.
+// All amounts are integer micro-dollars (see money.js).
 import fs from 'node:fs';
+import { usd, toMicro, MoneyError } from './money.js';
 
 export const CONFIG = {
-  mintPrice: Number(process.env.MINT_PRICE || 500),
+  mintPrice: toMicro(process.env.MINT_PRICE_USD || '5'),
   mintLimit: Number(process.env.MINT_LIMIT_PER_USER || 5),
   feeBps: Number(process.env.FEE_BPS || 250), // 2.5% market fee to the treasury
-  minWithdraw: Number(process.env.MIN_WITHDRAW || 100),
-  faucetAmount: Number(process.env.FAUCET_AMOUNT || 2000),
+  minWithdraw: toMicro(process.env.MIN_WITHDRAW_USD || '1'),
+  faucetAmount: toMicro(process.env.FAUCET_USD || '20'),
   testMode: process.env.TEST_MODE === '1',
 };
 
-export class MarketError extends Error {}
+// rule violations the assistant should relay to the user as a normal answer
+export class MarketError extends MoneyError {}
 const fail = (msg) => { throw new MarketError(msg); };
 
-export const fmt = (n) => `${Number(n).toLocaleString('en-US')} $MCP`;
+export const fmt = usd;
+export const CENT = 10_000; // micro-dollars
+export const feeOf = (price) => Math.floor((Number(price) * CONFIG.feeBps) / 10000);
 export const nftName = (id) => `MCP #${String(id).padStart(4, '0')}`;
 
 export async function seedCollection(db, collectionPath) {
@@ -45,7 +50,7 @@ export async function getUser(db, id) {
 async function move(t, userId, delta, kind, ref) {
   if (userId != null) {
     const rows = await t.query('update users set balance = balance + $1 where id = $2 and balance + $1 >= 0 returning balance', [delta, userId]);
-    if (!rows.length) fail('Not enough $MCP on your balance.');
+    if (!rows.length) fail('Not enough money on your balance.');
   }
   await t.query('insert into ledger (user_id, delta, kind, ref) values ($1, $2, $3, $4)', [userId, delta, kind, ref]);
 }
@@ -85,7 +90,7 @@ export async function mint(db, userId) {
 }
 
 export async function list(db, userId, nftId, price) {
-  if (!Number.isInteger(price) || price <= 0) fail('Price must be a whole number of $MCP above zero.');
+  if (!Number.isInteger(price) || price <= 0 || price % CENT) fail('Price must be in whole cents above zero.');
   const rows = await db.query('update nfts set price = $1, listed_at = now() where id = $2 and owner_id = $3 returning *', [price, nftId, userId]);
   if (!rows.length) fail(`You don't own ${nftName(nftId)}.`);
   return rows[0];
@@ -106,7 +111,7 @@ export async function buy(db, buyerId, nftId, expectedPrice) {
     const price = Number(nft.price);
     // the buyer agreed to a price; never charge more than that
     if (expectedPrice != null && price !== expectedPrice) fail(`Price changed: ${nftName(nftId)} now costs ${fmt(price)}. Confirm the new price first.`);
-    const fee = Math.floor((price * CONFIG.feeBps) / 10000);
+    const fee = feeOf(price);
     await move(t, buyerId, -price, 'buy', String(nftId));
     await move(t, nft.owner_id, price - fee, 'sale', String(nftId));
     if (fee) await move(t, null, fee, 'fee', String(nftId));
