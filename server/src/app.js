@@ -10,7 +10,7 @@ import { createAuth } from './auth.js';
 import { buildMcpServer } from './mcp.js';
 import { findRoot } from './paths.js';
 import * as m from './market.js';
-import { toMicro, dollars, MoneyError } from './money.js';
+import { toMicro, units, MoneyError } from './money.js';
 import { createDeposits } from './deposits.js';
 
 const sameSecret = (given, key) => {
@@ -82,14 +82,14 @@ export async function createApp(opts) {
   // public read-only API for the preview site
   const api = express.Router();
   api.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-  // amounts in the public API are plain US dollars
-  const num = dollars;
+  // amounts in the public API are plain numbers of $MCP (1 $MCP = $1)
+  const num = units;
   const shape = (n) => ({ ...n, price: num(n.price), image: `/img/${n.id}.png`, thumb: `/thumb/${n.id}.png` });
   const str = (v) => (typeof v === 'string' ? v : undefined);
   api.get('/stats', async (req, res) => {
     const s = await m.stats(db);
     res.json({
-      ...s, floor: num(s.floor), volume: num(s.volume), mint_price: num(s.mint_price), currency: 'USD',
+      ...s, floor: num(s.floor), volume: num(s.volume), mint_price: num(s.mint_price), currency: 'MCP', usd_per_mcp: 1,
       deposits: deposits.enabled ? { network: deposits.cluster === 'mainnet' ? 'solana' : `solana-${deposits.cluster}`, tokens: deposits.tokens.map((t) => t.symbol) } : null,
       mcp_url: mcpUrl.toString(), test_mode: m.CONFIG.testMode,
     });
@@ -130,7 +130,7 @@ export async function createApp(opts) {
   });
 
   // Manual credit for support cases (e.g. a deposit made the wrong way). Off (always 401) until ADMIN_TOKEN is set.
-  // Body: { handle, amount (US dollars), tx }. One tx is credited once.
+  // Body: { handle, amount ($MCP), tx }. One tx is credited once.
   app.post('/admin/deposit', express.json(), async (req, res) => {
     if (!sameSecret(String(req.get('authorization') || '').replace(/^Bearer /, ''), process.env.ADMIN_TOKEN)) return res.status(401).json({ error: 'unauthorized' });
     const { handle, amount, tx } = req.body || {};
@@ -141,7 +141,7 @@ export async function createApp(opts) {
     } catch (e) {
       if (!(e instanceof MoneyError)) throw e;
     }
-    if (!u || !micro || !tx) return res.status(400).json({ error: 'need handle, amount in dollars, tx' });
+    if (!u || !micro || !tx) return res.status(400).json({ error: 'need handle, amount in $MCP, tx' });
     res.json(await m.credit(db, u.id, micro, 'deposit', `manual ${String(tx).slice(0, 120)}`));
   });
 

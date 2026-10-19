@@ -1,8 +1,8 @@
 // Market rules: balances, mint, listings, buys, withdrawals. Every balance change writes a ledger row
 // in the same transaction, so sum(ledger) per user always equals users.balance.
-// All amounts are integer micro-dollars (see money.js).
+// All amounts are integer micro-units of $MCP, 1 $MCP = $1 (see money.js).
 import fs from 'node:fs';
-import { usd, toMicro, MoneyError } from './money.js';
+import { mcp, toMicro, MoneyError } from './money.js';
 
 export const CONFIG = {
   mintPrice: toMicro(process.env.MINT_PRICE_USD || '5'),
@@ -17,8 +17,8 @@ export const CONFIG = {
 export class MarketError extends MoneyError {}
 const fail = (msg) => { throw new MarketError(msg); };
 
-export const fmt = usd;
-export const CENT = 10_000; // micro-dollars
+export const fmt = mcp;
+export const CENT = 10_000; // 0.01 $MCP in micro-units
 export const feeOf = (price) => Math.floor((Number(price) * CONFIG.feeBps) / 10000);
 export const nftName = (id) => `MCP #${String(id).padStart(4, '0')}`;
 
@@ -50,7 +50,7 @@ export async function getUser(db, id) {
 async function move(t, userId, delta, kind, ref) {
   if (userId != null) {
     const rows = await t.query('update users set balance = balance + $1 where id = $2 and balance + $1 >= 0 returning balance', [delta, userId]);
-    if (!rows.length) fail('Not enough money on your balance.');
+    if (!rows.length) fail('Not enough $MCP on your balance.');
   }
   await t.query('insert into ledger (user_id, delta, kind, ref) values ($1, $2, $3, $4)', [userId, delta, kind, ref]);
 }
@@ -90,7 +90,7 @@ export async function mint(db, userId) {
 }
 
 export async function list(db, userId, nftId, price) {
-  if (!Number.isInteger(price) || price <= 0 || price % CENT) fail('Price must be in whole cents above zero.');
+  if (!Number.isInteger(price) || price <= 0 || price % CENT) fail('Price must be above zero with at most 2 decimals.');
   const rows = await db.query('update nfts set price = $1, listed_at = now() where id = $2 and owner_id = $3 returning *', [price, nftId, userId]);
   if (!rows.length) fail(`You don't own ${nftName(nftId)}.`);
   return rows[0];

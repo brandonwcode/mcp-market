@@ -1,7 +1,7 @@
 // Deposits: every user gets a personal Solana address from the deposit pool (see pool.js). The pool is made
 // offline from a seed phrase the server never sees, so this code can watch the addresses and credit deposits
 // but can't move funds out of them. We watch each address's USDC and USDT token accounts and credit whatever
-// arrives, 1 token = $1. Three things look for deposits, and each one is safe to repeat:
+// arrives, 1 token = 1 $MCP. Three things look for deposits, and each one is safe to repeat:
 //   1. the Helius webhook (POST /hooks/helius) the moment a transaction touches one of our token accounts;
 //   2. the deposit tool, when the user asks;
 //   3. a scheduled function every few minutes, for anything the first two missed.

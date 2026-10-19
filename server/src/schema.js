@@ -3,7 +3,7 @@
 // instances never race each other.
 import crypto from 'node:crypto';
 
-// Amounts are integer micro-dollars (1 USD = 1,000,000), like USDC/USDT on Solana. See money.js.
+// Amounts are integer micro-units of $MCP (1 $MCP = $1 = 1,000,000 units), like USDC/USDT on Solana. See money.js.
 export const SCHEMA = `
 create table if not exists app_meta (
   key text primary key,
@@ -82,7 +82,7 @@ create table if not exists deposits (
   signature text not null,
   token text not null,
   token_account text not null,
-  amount bigint not null,               -- micro-dollars
+  amount bigint not null,               -- micro-units ($MCP = token amount, 6 decimals)
   slot bigint,
   status text not null,                 -- credited | too_small
   created_at timestamptz not null default now(),
